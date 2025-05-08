@@ -861,12 +861,40 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
     """
     # 1. Historical worst case scenarios (based on actual factor data)
     factor_quantiles = {}
-    for q in [0.01, 0.05, 0.10]: # 1%, 5%, 10% worst historical daily changes/returns
-        # Ensure factors used here are the same as in betas.index
-        relevant_factors = factors[betas.index.intersection(factors.columns)]
-        factor_quantiles[f"Historical_{int(q*100)}pct"] = relevant_factors.quantile(q)
     
+    # Calculate historical portfolio returns based on factor exposures (betas) and factor returns
+    relevant_factor_names = betas.index.intersection(factors.columns)
+    historical_portfolio_returns = pd.Series(dtype=float)  # Initialize as an empty Series
 
+    if not relevant_factor_names.empty and not factors.empty and not betas.empty:
+        aligned_factors = factors[relevant_factor_names]
+        aligned_betas = betas[relevant_factor_names]
+        # Ensure that after alignment, we still have data and dimensions match for dot product
+        if not aligned_factors.empty and not aligned_betas.empty and \
+           aligned_factors.shape[0] > 0 and aligned_factors.shape[1] == aligned_betas.shape[0]:
+            historical_portfolio_returns = aligned_factors.dot(aligned_betas)
+        else:
+            # This case might occur if, e.g., betas exist but for factors not in the 'factors' DataFrame
+            # Or if data is malformed. Consider adding logging here for diagnostics.
+            # historical_portfolio_returns will remain empty, leading to 0.0 or NaN VaR values below.
+            pass
+
+    # Calculate historical portfolio VaR for 1%, 5%, and 10% quantiles
+    # These correspond to 99% VaR (most loss), 95% VaR, and 90% VaR (least loss of the three)
+    for q_val in [0.01, 0.05, 0.10]:
+        percent_label = int(q_val * 100)  # Gives 1, 5, 10
+        scenario_name = f"Historical_{percent_label}pct" # Historical_1pct, Historical_5pct, Historical_10pct
+        
+        if not historical_portfolio_returns.empty and historical_portfolio_returns.notna().any():
+            # .quantile(q_val) gives the value at that quantile from the historical portfolio returns.
+            # For returns, lower quantiles (e.g., 0.01) represent larger losses (more negative numbers).
+            portfolio_var_at_q = historical_portfolio_returns.quantile(q_val)
+            factor_quantiles[scenario_name] = portfolio_var_at_q
+        else:
+            # If portfolio returns could not be calculated (e.g., no overlapping factors, empty data),
+            # assign a default value. Using 0.0 here. np.nan could also be an option.
+            factor_quantiles[scenario_name] = 0.0
+    
     custom_scenarios = {
         "Market_Crash": {"Mkt-RF": -0.07, "VIX_Diff": 15},  # Mkt-RF shock, VIX_Diff shock (15 point VIX increase)
         "Rate_Shock": {"10Y_Yield_Diff": 0.005, "2Y_Yield_Diff": 0.010}, # 0.5% and 1% increase in yield changes
@@ -900,12 +928,19 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
     # Calculate impact for each scenario
     stress_results = {}
     
-    for scenario_name, scenario_values in all_scenarios.items():
-        impact = 0
-        for factor, shock in scenario_values.items():
-            if factor in betas.index:
-                impact += betas[factor] * shock
-        stress_results[scenario_name] = impact
+    for scenario_name, scenario_data in all_scenarios.items():
+        if isinstance(scenario_data, dict):  # Factor shock scenario
+            impact = 0
+            for factor, shock in scenario_data.items():
+                if factor in betas.index:  # Check if the factor from scenario exists in portfolio betas
+                    impact += betas[factor] * shock
+            stress_results[scenario_name] = impact
+        elif isinstance(scenario_data, (float, np.float64)):  # Pre-calculated impact (e.g., historical VaR)
+            stress_results[scenario_name] = scenario_data
+        else:
+            # Log a warning or handle unexpected data types for a scenario
+            st.warning(f"Unexpected data type for scenario '{scenario_name}': {type(scenario_data)}. Result set to NaN.")
+            stress_results[scenario_name] = np.nan
     
     return pd.Series(stress_results).sort_values()
 
