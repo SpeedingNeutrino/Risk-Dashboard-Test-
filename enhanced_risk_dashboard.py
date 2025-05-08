@@ -35,6 +35,9 @@ from matplotlib.ticker import PercentFormatter
 import matplotlib.dates as mdates
 
 import yfinance as yf
+import plotly.express as px  # type: ignore
+import plotly.graph_objects as go  # type: ignore
+from plotly.subplots import make_subplots  # type: ignore
 
 # ────────────────────────── Dependency Check ──────────────────────────
 missing: list[str] = []
@@ -63,6 +66,10 @@ try:
 except ImportError:
     pdr = None  # type: ignore
     missing.append("pandas-datareader")
+
+if norm is None or PCA is None:
+    st.error("SciPy and scikit-learn are required – run `pip install --upgrade numpy scipy scikit-learn`.")
+    st.stop()
 try:
     import plotly.express as px  # type: ignore
     import plotly.graph_objects as go  # type: ignore
@@ -70,11 +77,6 @@ try:
     USE_PLOTLY = True
 except ImportError:
     USE_PLOTLY = False
-
-if norm is None or PCA is None:
-    st.error("SciPy and scikit-learn are required – run `pip install --upgrade numpy scipy scikit-learn`.")
-    st.stop()
-
 # ───────────────────────────── Config ──────────────────────────────
 DEFAULT_START = "2018-01-01"
 
@@ -976,64 +978,80 @@ def plot_stress_tests(stress_results: pd.Series) -> Tuple[plt.Figure, plt.Axes]:
     plt.tight_layout()
     return fig, ax
 
-def plot_rolling_betas(rolling_betas, reg_results=None, significance_level=0.05):
+def plot_rolling_betas(rolling_betas_df, reg_results=None, significance_level=0.10, top_n_by_mean_abs_beta=4):
     """
-    Plot rolling factor exposures.
-    If reg_results is provided, shows factors that are statistically significant, ranked by p-value.
-    Otherwise, shows top factors by average absolute rolling beta magnitude.
-    """
-    if rolling_betas is None or rolling_betas.empty:
-        st.warning("No rolling beta data to plot.")
-        return None, None
+    Plots rolling factor betas using Plotly, highlighting significant ones based on recent regression 
+    or overall significance if recent data is insufficient.
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    Args:
+        rolling_betas_df (pd.DataFrame): DataFrame with dates as index and factor betas as columns.
+        reg_results (dict, optional): Dictionary containing regression results like 'pvalues'.
+        significance_level (float, optional): p-value threshold for a factor to be considered significant.
+        top_n_by_mean_abs_beta (int, optional): If no factors are significant by p-value, 
+                                              plot top N factors by mean absolute beta.
+
+    Returns:
+        tuple: (plotly.graph_objects.Figure or None, list)
+               The Plotly figure object for the rolling betas plot, or None if no data.
+               A list of factor names that were actually plotted.
+    """
+    if rolling_betas_df is None or rolling_betas_df.empty:
+        return None, []
+
     factors_to_plot = []
-    plot_title = "Rolling Factor Exposures"
+    legend_labels = {}
 
-    if reg_results and 'pvalues' in reg_results and 'betas' in reg_results:
-        significant_pvalues = reg_results['pvalues'][reg_results['pvalues'] <= significance_level]
-        
-        if not significant_pvalues.empty:
-            # Sort significant factors by p-value (most significant first)
-            factors_to_plot_series = significant_pvalues.sort_values()
-            factors_to_plot = factors_to_plot_series.index.tolist()
-            # Limit the number of factors plotted for clarity, e.g., top 6
-            factors_to_plot = factors_to_plot[:min(6, len(factors_to_plot))]
-            plot_title = f"Rolling Factor Exposures (Significant at {((1-significance_level)*100):.0f}% Conf., Ranked by p-value)"
-            
+    # Determine which factors to plot based on significance or magnitude
+    if reg_results and 'pvalues' in reg_results:
+        significant_factors = reg_results['pvalues'][reg_results['pvalues'] <= significance_level].index.tolist()
+        if significant_factors:
+            factors_to_plot = [f for f in significant_factors if f in rolling_betas_df.columns]
             for factor in factors_to_plot:
-                if factor in rolling_betas.columns:
-                    p_val = reg_results['pvalues'].get(factor, float('nan'))
-                    rolling_betas[factor].plot(ax=ax, label=f"{factor} (p={p_val:.4f})")
-        else:
-            st.info(f"No factors are statistically significant at {significance_level*100:.0f}%. Showing top 4 by avg. rolling beta magnitude.")
-            # Fallback to top factors by magnitude if none are significant
-            factors_to_plot = rolling_betas.abs().mean().nlargest(4).index.tolist()
-            plot_title = "Rolling Factor Exposures (Top 4 by Avg. Magnitude - No Significant Factors)"
-            for factor in factors_to_plot:
-                if factor in rolling_betas.columns:
-                    rolling_betas[factor].plot(ax=ax, label=factor)
-    else:
-        # Fallback if no regression results are provided
-        factors_to_plot = rolling_betas.abs().mean().nlargest(4).index.tolist()
-        plot_title = "Rolling Factor Exposures (Top 4 by Avg. Magnitude)"
+                p_value = reg_results['pvalues'].get(factor, 1)
+                legend_labels[factor] = f"{factor} (p={p_value:.2f})"
+
+    # If no p-values provided or no significant factors from p-values, try top N by mean absolute beta
+    if not factors_to_plot and not rolling_betas_df.columns.empty:
+        mean_abs_betas = rolling_betas_df.abs().mean().nlargest(top_n_by_mean_abs_beta)
+        factors_to_plot = mean_abs_betas.index.tolist()
         for factor in factors_to_plot:
-            if factor in rolling_betas.columns:
-                rolling_betas[factor].plot(ax=ax, label=factor)
-
-    if not factors_to_plot: # If still no factors to plot (e.g. rolling_betas was empty for selected factors)
-        ax.text(0.5, 0.5, "No factor exposures to display for the selected criteria.", 
-                horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
-        st.info("No factor exposures to display based on current criteria.")
-
-    ax.set_title(plot_title)
-    ax.legend(loc='best')
-    ax.grid(True, alpha=0.3)
-    ax.axhline(y=0, color='black', linestyle='-', alpha=0.7, linewidth=0.8)
+            legend_labels[factor] = f"{factor} (Top {top_n_by_mean_abs_beta})"
     
-    return fig, ax
+    # If still no factors (e.g., rolling_betas_df might have no columns after filtering)
+    if not factors_to_plot:
+        # Try to plot any available columns if top_n_by_mean_abs_beta was 0 or columns were few
+        if not rolling_betas_df.columns.empty:
+            factors_to_plot = rolling_betas_df.columns.tolist()[:top_n_by_mean_abs_beta] # take some if available
+            for factor in factors_to_plot:
+                 legend_labels[factor] = factor # Default label
+        else:
+            return None, [] # No data to plot
 
-# ───── Advanced PCA Analysis ─────
+    fig = go.Figure()
+    
+    actually_plotted_factors = []
+    for factor in factors_to_plot:
+        if factor in rolling_betas_df.columns:
+            fig.add_trace(go.Scatter(x=rolling_betas_df.index, 
+                                     y=rolling_betas_df[factor], 
+                                     mode='lines', 
+                                     name=legend_labels.get(factor, factor)))
+            actually_plotted_factors.append(factor)
+
+    if not actually_plotted_factors:
+        return None, [] # No factors ended up being plotted
+
+    fig.update_layout(
+        title="Rolling Factor Exposures",
+        xaxis_title="Date",
+        yaxis_title="Beta",
+        legend_title_text='Factors',
+        height=500,
+        margin=dict(l=50, r=50, t=80, b=50),
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="grey")
+
+    return fig, actually_plotted_factors
 
 def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -> dict:
     """
@@ -1133,8 +1151,7 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
     }
 
 # ───── Dashboard Core ─────
-
-def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Optional[pd.DataFrame] = None, factor_window: int = 126, factor_exposure_smoothing_window: int = 21):
+def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Optional[pd.DataFrame] = None, factor_window: int = 126, factor_exposure_smoothing_window: int = 21, factor_rolling_return_window: int = 21):
     # Check for missing tickers and notify user
     miss = [t for t in weights.index if t not in prices.columns]
     if miss:
@@ -1233,7 +1250,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     st.header("2. Correlation Analysis")
     st.subheader("Asset Correlation")
     fig_corr, _ = show_enhanced_corr(rets)
-    st.pyplot(fig_corr)
+    st.pyplot(fig)
 
     st.header("3. Volatility Analysis")
     st.subheader("Rolling Volatility")
@@ -1422,10 +1439,66 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 smoothed_rolling_betas = rolling_betas.rolling(window=factor_exposure_smoothing_window, min_periods=1).mean()
                 st.caption(f"Rolling exposures smoothed with a {factor_exposure_smoothing_window}-day moving average.")
             
-            fig_betas, _ = plot_rolling_betas(smoothed_rolling_betas, reg_results=reg_results)
+            fig_betas, factors_shown_in_beta_plot = plot_rolling_betas(smoothed_rolling_betas, reg_results=reg_results) # MODIFIED LINE
             if fig_betas:
-                st.pyplot(fig_betas)
+                st.plotly_chart(fig_betas, use_container_width=True)
+
+            # Determine significant factors for the cumulative return plot.
+            # Priority:
+            # 1. Factors actually plotted in the rolling beta chart.
+            # 2. If beta plot is empty/showed no factors, fall back to significant factors from overall regression.
+            # 3. If still none, fall back to top N from smoothed rolling betas by magnitude.
+            significant_factors_to_plot = []
+            if factors_shown_in_beta_plot: # MODIFIED BLOCK - START
+                significant_factors_to_plot = factors_shown_in_beta_plot
+            else: 
+                if reg_results and 'pvalues' in reg_results:
+                    significant_pvalues = reg_results['pvalues'][reg_results['pvalues'] <= 0.10]
+                    if not significant_pvalues.empty:
+                        significant_factors_to_plot = significant_pvalues.index.tolist()
+                
+                if not significant_factors_to_plot and smoothed_rolling_betas is not None and not smoothed_rolling_betas.empty:
+                    if not smoothed_rolling_betas.columns.empty:
+                        significant_factors_to_plot = smoothed_rolling_betas.abs().mean().nlargest(min(4, len(smoothed_rolling_betas.columns))).index.tolist()
+                    else:
+                        significant_factors_to_plot = [] # MODIFIED BLOCK - END
             
+            if significant_factors_to_plot and factors is not None:
+                st.subheader(f"Cumulative Factor Returns (Rolling {factor_rolling_return_window}-Day Sum)")
+                
+                # Ensure only factors present in the 'factors' DataFrame are used
+                available_factors_for_plot = [f for f in significant_factors_to_plot if f in factors.columns]
+
+                if available_factors_for_plot:
+                    aligned_factors_for_plot = factors.loc[port_r.index.intersection(factors.index), available_factors_for_plot]
+                    
+                    if not aligned_factors_for_plot.empty:
+                        rolling_factor_returns_sum = aligned_factors_for_plot.rolling(window=factor_rolling_return_window, min_periods=max(1, factor_rolling_return_window // 2)).sum().dropna()
+                        
+                        if not rolling_factor_returns_sum.empty:
+                            # Use Plotly for cumulative factor returns (already updated in previous step)
+                            fig_cum_factor_returns = go.Figure()
+                            for factor in rolling_factor_returns_sum.columns:
+                                fig_cum_factor_returns.add_trace(go.Scatter(x=rolling_factor_returns_sum.index, y=rolling_factor_returns_sum[factor], mode='lines', name=factor))
+                            
+                            fig_cum_factor_returns.update_layout(
+                                title=f"Cumulative Factor Returns (Rolling {factor_rolling_return_window}-Day Sum)",
+                                xaxis_title="Date",
+                                yaxis_title="Cumulative Return",
+                                legend_title_text='Factors',
+                                height=500,
+                                margin=dict(l=50, r=50, t=80, b=50),
+                            )
+                            st.plotly_chart(fig_cum_factor_returns, use_container_width=True)
+                        else:
+                            st.info("No data available for cumulative factor returns plot after rolling sum.")
+                    else:
+                        st.info("Could not align selected factors with portfolio returns for the cumulative plot.")
+                else:
+                    st.info("None of the selected factors for the cumulative plot are available in the factor data.")
+            elif not significant_factors_to_plot:
+                st.info("No significant factors identified to plot cumulative returns.")
+
             # Factor timing analysis
             st.subheader("Factor Timing Analysis")
             timing_analysis = calc_factor_timing(port_r, factors, window=rolling_window)
@@ -1472,7 +1545,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     if factors is not None and reg_results is not None:
         # Prioritize rolling betas if available and valid
         # Ensure 'rolling_betas' is in the local scope from section 5
-        if 'rolling_betas' in locals() and rolling_betas is not None and not rolling_betas.empty:
+        if 'rolling_betas' in locals() and rolling_betas is not None and rolling_betas.empty:
             # Align rolling_betas with portfolio returns and factors
             # Ensure factors used for attribution are present in rolling_betas columns
             factors_for_attr = factors.loc[:, factors.columns.isin(rolling_betas.columns)]
@@ -1533,18 +1606,22 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                     # Interactive Plotly chart
                     fig = go.Figure()
                     
-                    # Add each factor contribution
                     for col in cum_attribution.columns:
                         fig.add_trace(go.Scatter(
                             x=cum_attribution.index,
                             y=cum_attribution[col],
                             mode='lines',
                             name=col,
-                            stackgroup='one'
+                            stackgroup='one',  # All traces in the same stack group
+                            fill='tonexty',    # Fill to previous trace in the stack
+                            line=dict(width=0.5)
                         ))
+                        
+                        # Add hover text for detailed info
+                        fig.update_traces(hoverinfo="name+x+y")
                     
                     fig.update_layout(
-                        title="Cumulative Factor Attribution",
+                        title="Cumulative Factor Attribution (Stacked)",
                         xaxis_title="Date",
                         yaxis_title="Cumulative Return",
                         legend=dict(x=0.01, y=0.99, orientation="v"),
@@ -1556,8 +1633,11 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 else:
                     # Matplotlib fallback
                     fig, ax = plt.subplots(figsize=(12, 6))
-                    cum_attribution.plot(kind='area', stacked=True, ax=ax)
-                    ax.set_title("Cumulative Factor Attribution")
+                    
+                    cum_attribution.plot(kind='area', stacked=True, ax=ax, linewidth=0.5)
+                    
+                    ax.axhline(0, color='black', linewidth=0.5) # Add a zero line for clarity
+                    ax.set_title("Cumulative Factor Attribution (Stacked)")
                     ax.set_ylabel("Cumulative Return")
                     ax.grid(True, alpha=0.3)
                     st.pyplot(fig)
@@ -1579,7 +1659,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 st.dataframe(attribution_summary.style.format({
                     'Ann. Contribution': '{:.4%}',
                     'Percent of Total': '{:.2f}%'
-                }).background_gradient(cmap='RdYlGn', subset=['Ann. Contribution']))
+                               }).background_gradient(cmap='RdYlGn', subset=['Ann. Contribution']))
 
     # 7. Report Summary
     st.header("7. Risk Report Summary")
@@ -1607,12 +1687,13 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     with summary_col2:
         st.subheader("Top Factor Exposures")
         if reg_results is not None:
-            # Get top absolute exposures
-            top_exposures = reg_results['betas'].abs().nlargest(5)
+            # Get top absolute exposures by t-statistic (significance)
+            top_exposures_sorted_by_significance = reg_results['tvalues'].abs().nlargest(5)
+            
             exposures_df = pd.DataFrame({
-                'Factor': top_exposures.index,
-                'Exposure': reg_results['betas'][top_exposures.index],
-                't-stat': reg_results['tvalues'][top_exposures.index]
+                'Factor': top_exposures_sorted_by_significance.index,
+                'Exposure': reg_results['betas'][top_exposures_sorted_by_significance.index],
+                't-stat': reg_results['tvalues'][top_exposures_sorted_by_significance.index]
             })
             
             st.dataframe(exposures_df.style.format({
@@ -1629,6 +1710,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
         summary_data = {
             "Portfolio Info": ["", ""],
             "# of Holdings": [len(weights), ""],
+
             "Start Date": [pd.to_datetime(start).strftime('%Y-%m-%d'), ""],
             "End Date": [rets.index[-1].strftime('%Y-%m-%d'), ""],
             "": ["", ""],
@@ -1655,11 +1737,16 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 "Systematic Risk %": [reg_results['factor_contrib'].sum() / (reg_results['factor_contrib'].sum() + reg_results['specific_var']) * 100, "{:.2f}%"],
             }
             
-            # Add top factor exposures
-            top_factors = reg_results['betas'].abs().nlargest(5)
-            for i, (factor, beta) in enumerate(zip(top_factors.index, reg_results['betas'][top_factors.index])):
-                factor_data[f"Factor {i+1}: {factor}"] = [beta, "{:.4f}"]
-                
+            # Add top factor exposures by significance for CSV
+            if reg_results is not None: # Ensure reg_results exists before using it for CSV
+                factor_data = {} # Initialize factor_data locally if it's not already
+                top_factors_by_significance_csv = reg_results['tvalues'].abs().nlargest(5)
+                for i, factor_name in enumerate(top_factors_by_significance_csv.index):
+                    beta_value = reg_results['betas'][factor_name]
+                    t_value = reg_results['tvalues'][factor_name]
+                    # Update key to include t-stat for clarity on sorting criteria
+                    factor_data[f"Factor {i+1}: {factor_name} (t-stat: {t_value:.2f})"] = [beta_value, "{:.4f}"]
+            
             summary_data.update(factor_data)
         
         # Create DataFrame
@@ -1720,6 +1807,14 @@ def main():
         value=21, 
         step=1,
         help="Number of days for smoothing rolling factor exposures. 1 means no smoothing."
+    )
+    factor_rolling_return_window = st.sidebar.number_input(
+        "Factor Rolling Return Window (Days)",
+        min_value=5,
+        max_value=252,
+        value=21,
+        step=1,
+        help="Window in days for calculating rolling sum of factor returns for the plot below factor exposures."
     )
     
     # 3. Portfolio Input Method
@@ -1786,7 +1881,7 @@ def main():
     st.sidebar.subheader("Factor Data")
     factor_source = st.sidebar.radio(
         "Factor Data Source",
-        ["Online (Ken French + FRED)", "Upload Factor CSV", "Generate Synthetic Factors"],
+        ["Online (Ken French + FRED)", "Upload Factor CSV", "Generate Synthetic Factors (Not Implemented)"],
         help="Choose your factor data source"
        )
     
@@ -1861,7 +1956,7 @@ def main():
         
         # --- Run Dashboard ---
         if not prices_df.empty and weights is not None and not weights.empty:
-            dashboard(weights, prices_df, start_date.strftime('%Y-%m-%d'), factors, factor_window, factor_exposure_smoothing_window)
+            dashboard(weights, prices_df, start_date.strftime('%Y-%m-%d'), factors, factor_window, factor_exposure_smoothing_window, factor_rolling_return_window)
         else:
             st.info("Analysis could not proceed. Please check portfolio holdings and ensure price data can be loaded.")
 
