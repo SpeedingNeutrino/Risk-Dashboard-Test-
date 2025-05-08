@@ -945,7 +945,7 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
     return pd.Series(stress_results).sort_values()
 
 # ───── Plotting Utility Functions ─────
-def show_enhanced_corr(returns_df: pd.DataFrame, annot_threshold: float = 0.3) -> Tuple[plt.Figure, plt.Axes]:
+def show_enhanced_corr(returns_df: pd.DataFrame, annot_threshold: float = 0.0) -> Tuple[plt.Figure, plt.Axes]:
     """Display an enhanced correlation matrix heatmap."""
     corr_matrix = returns_df.corr()
     fig, ax = plt.subplots(figsize=(max(8, len(corr_matrix.columns) * 0.8), max(6, len(corr_matrix.columns) * 0.6)))
