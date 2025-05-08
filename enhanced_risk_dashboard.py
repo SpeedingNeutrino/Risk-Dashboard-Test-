@@ -76,12 +76,10 @@ if norm is None or PCA is None:
     st.stop()
 
 # ───────────────────────────── Config ──────────────────────────────
-DATA_PATH = Path(r"C:/Users/devansh.bhatt/OneDrive - Lighthouse Canton Pte Ltd/Desktop/Python Files/Market Data/sp_top1500_ohlc_data.csv")
-
 DEFAULT_START = "2018-01-01"
 
 # Extended factor mappings
-FF5_MAP = {"MKT": "Mkt-RF", "SMB": "SMB", "HML": "HML", "RMW": "RMW", "CMA": "CMA", "UMD": "Mom"}
+FF5_MAP = {"MKT": "Mkt-RF", "SMB": "SMB", "HML": "HML", "RMW": "RMW", "CMA": "CMA", "UMD": "Mom"} # RF is not typically mapped here, Mkt-RF is MKT - RF
 
 # Extended FRED data for macro factors
 MACRO_FRED = {
@@ -99,7 +97,7 @@ MACRO_FRED = {
 
 # Categorized factor groups
 FACTOR_GROUPS = {
-    "Traditional": ["Mkt-RF", "SMB", "HML", "UMD", "RMW", "CMA"],
+    "Traditional": ["Mkt-RF", "SMB", "HML", "UMD", "RMW", "CMA"], # Ensure RF is not here
     "Style": ["Value", "Size", "Momentum", "Quality", "Low_Vol", "Growth"], # Synthetic factors
     "Macro": ["Yield_Curve_Diff", "USD_Index", "WTI_Oil", "VIX_Diff", "Credit_Spread_Diff", "TED_Spread_Diff", "CPI"], # Standardized names
     "Smart Beta": ["Min_Vol", "Max_Div", "Equal_Weight", "Quality_Tilt", "ESG_Tilt"] # Synthetic factors
@@ -423,12 +421,21 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
     try:
         with st.sidebar.expander("Fama-French Factor Fetch"):
             st.info("Attempting to fetch Fama-French factors...")
-            raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "famafrench", start=start)
-            ff = raw_data[0] / 100
+            # Fama-French data includes Mkt-RF, SMB, HML, RMW, CMA, and RF
+            raw_data_ff = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "famafrench", start=start)
+            ff = raw_data_ff[0] / 100 # raw_data[0] is the DataFrame with factors including RF
             ff.index = pd.to_datetime(ff.index).tz_localize(None)
+            
+            # Explicitly drop the 'RF' column if it exists
+            if 'RF' in ff.columns:
+                ff = ff.drop(columns=['RF'])
+                st.success("Dropped 'RF' column from Fama-French data.")
+            else:
+                st.info("'RF' column not found in Fama-French data to drop.")
+
             ff.rename(columns=FF5_MAP, inplace=True) # FF5_MAP renames MKT to Mkt-RF
             ff = ff.loc[ff.index >= pd.to_datetime(start)]
-            st.success(f"Successfully fetched {len(ff)} rows of Fama-French 5 factor data")
+            st.success(f"Successfully fetched and processed {len(ff)} rows of Fama-French 5 factor data (excluding RF).")
             st.write(ff.tail())
             ff_data = ff
     except Exception as e:
@@ -900,6 +907,132 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
     
     return pd.Series(stress_results).sort_values()
 
+# ───── Plotting Utility Functions ─────
+def show_enhanced_corr(returns_df: pd.DataFrame, annot_threshold: float = 0.3) -> Tuple[plt.Figure, plt.Axes]:
+    """Display an enhanced correlation matrix heatmap."""
+    corr_matrix = returns_df.corr()
+    fig, ax = plt.subplots(figsize=(max(8, len(corr_matrix.columns) * 0.8), max(6, len(corr_matrix.columns) * 0.6)))
+    cmap = plt.get_cmap('coolwarm') # More vibrant colormap
+    cax = ax.matshow(corr_matrix, cmap=cmap, vmin=-1, vmax=1)
+    fig.colorbar(cax)
+    
+    ax.set_xticks(np.arange(len(corr_matrix.columns)))
+    ax.set_yticks(np.arange(len(corr_matrix.columns)))
+    ax.set_xticklabels(corr_matrix.columns, rotation=90)
+    ax.set_yticklabels(corr_matrix.columns)
+    
+    # Add annotations for significant correlations
+    for i in range(len(corr_matrix.columns)):
+        for j in range(len(corr_matrix.columns)):
+            val = corr_matrix.iloc[i, j]
+            if abs(val) > annot_threshold: # Annotate if correlation is strong
+                ax.text(j, i, f'{val:.2f}', ha='center', va='center', color='black' if abs(val) < 0.7 else 'white')
+    ax.set_title('Asset Correlation Matrix', pad=20)
+    plt.tight_layout()
+    return fig, ax
+
+def show_roll_vol_enhanced(portfolio_returns: pd.Series, window: int = 252, secondary_window: int = 63) -> Tuple[plt.Figure, plt.Axes]:
+    """Display rolling volatility with primary and secondary windows."""
+    fig, ax = plt.subplots(figsize=(12, 5))
+    roll_vol_primary = portfolio_returns.rolling(window=window).std() * np.sqrt(252)
+    roll_vol_secondary = portfolio_returns.rolling(window=secondary_window).std() * np.sqrt(252)
+    
+    roll_vol_primary.plot(ax=ax, label=f'{window}-Day Rolling Vol', color='blue')
+    roll_vol_secondary.plot(ax=ax, label=f'{secondary_window}-Day Rolling Vol', color='orange', linestyle='--')
+    
+    ax.set_title(f'Annualized Rolling Volatility ({window}-day and {secondary_window}-day)')
+    ax.set_ylabel('Annualized Volatility')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig, ax
+
+def plot_factor_contrib(factor_contrib: pd.Series, specific_var: float) -> Tuple[plt.Figure, plt.Axes]:
+    """Plot factor contributions to variance and specific variance."""
+    # Combine factor contributions and specific variance
+    all_contrib = factor_contrib.copy()
+    all_contrib['Specific Risk'] = specific_var
+    
+    # Calculate percentages
+    total_variance = all_contrib.sum()
+    contrib_pct = (all_contrib / total_variance) * 100
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    contrib_pct.sort_values(ascending=False).plot(kind='bar', ax=ax)
+    ax.set_title('Factor Contribution to Portfolio Variance')
+    ax.set_ylabel('Percentage of Total Variance (%)')
+    ax.yaxis.set_major_formatter(PercentFormatter(100, decimals=0))
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    return fig, ax
+
+def plot_stress_tests(stress_results: pd.Series) -> Tuple[plt.Figure, plt.Axes]:
+    """Plot stress test impacts."""
+    fig, ax = plt.subplots(figsize=(10, max(5, len(stress_results) * 0.4)))
+    stress_results.sort_values().plot(kind='barh', ax=ax, color=['red' if x < 0 else 'green' for x in stress_results.sort_values()])
+    ax.set_title('Portfolio Impact Under Stress Scenarios')
+    ax.set_xlabel('Expected Portfolio Return Change (%)')
+    ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+    plt.tight_layout()
+    return fig, ax
+
+def plot_rolling_betas(rolling_betas, reg_results=None, significance_level=0.05):
+    """
+    Plot rolling factor exposures.
+    If reg_results is provided, shows factors that are statistically significant, ranked by p-value.
+    Otherwise, shows top factors by average absolute rolling beta magnitude.
+    """
+    if rolling_betas is None or rolling_betas.empty:
+        st.warning("No rolling beta data to plot.")
+        return None, None
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    factors_to_plot = []
+    plot_title = "Rolling Factor Exposures"
+
+    if reg_results and 'pvalues' in reg_results and 'betas' in reg_results:
+        significant_pvalues = reg_results['pvalues'][reg_results['pvalues'] <= significance_level]
+        
+        if not significant_pvalues.empty:
+            # Sort significant factors by p-value (most significant first)
+            factors_to_plot_series = significant_pvalues.sort_values()
+            factors_to_plot = factors_to_plot_series.index.tolist()
+            # Limit the number of factors plotted for clarity, e.g., top 6
+            factors_to_plot = factors_to_plot[:min(6, len(factors_to_plot))]
+            plot_title = f"Rolling Factor Exposures (Significant at {((1-significance_level)*100):.0f}% Conf., Ranked by p-value)"
+            
+            for factor in factors_to_plot:
+                if factor in rolling_betas.columns:
+                    p_val = reg_results['pvalues'].get(factor, float('nan'))
+                    rolling_betas[factor].plot(ax=ax, label=f"{factor} (p={p_val:.4f})")
+        else:
+            st.info(f"No factors are statistically significant at {significance_level*100:.0f}%. Showing top 4 by avg. rolling beta magnitude.")
+            # Fallback to top factors by magnitude if none are significant
+            factors_to_plot = rolling_betas.abs().mean().nlargest(4).index.tolist()
+            plot_title = "Rolling Factor Exposures (Top 4 by Avg. Magnitude - No Significant Factors)"
+            for factor in factors_to_plot:
+                if factor in rolling_betas.columns:
+                    rolling_betas[factor].plot(ax=ax, label=factor)
+    else:
+        # Fallback if no regression results are provided
+        factors_to_plot = rolling_betas.abs().mean().nlargest(4).index.tolist()
+        plot_title = "Rolling Factor Exposures (Top 4 by Avg. Magnitude)"
+        for factor in factors_to_plot:
+            if factor in rolling_betas.columns:
+                rolling_betas[factor].plot(ax=ax, label=factor)
+
+    if not factors_to_plot: # If still no factors to plot (e.g. rolling_betas was empty for selected factors)
+        ax.text(0.5, 0.5, "No factor exposures to display for the selected criteria.", 
+                horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+        st.info("No factor exposures to display based on current criteria.")
+
+    ax.set_title(plot_title)
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.7, linewidth=0.8)
+    
+    return fig, ax
+
 # ───── Advanced PCA Analysis ─────
 
 def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -> dict:
@@ -912,32 +1045,33 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
     
     # Standardize returns
     scaler = StandardScaler()
-    scaled_rets = scaler.fit_transform(rets)
+    # Drop NaNs before scaling to avoid issues with fit_transform
+    scaled_rets = scaler.fit_transform(rets.dropna()) 
     
+    # Adjust index for pca_result if rets had NaNs
+    valid_index = rets.dropna().index
+
     # Run PCA
-    # Ensure n_components is not more than available features or samples
     actual_n_components = min(n_components, scaled_rets.shape[0], scaled_rets.shape[1])
     if actual_n_components < 1:
         st.warning("Cannot run PCA with less than 1 component.")
         return None
 
     pca = PCA(n_components=actual_n_components)
-    pca_result = pca.fit_transform(scaled_rets)
+    # pca_result will have index corresponding to rets.dropna()
+    pca_result = pca.fit_transform(scaled_rets) 
     
-    # Extract components and loadings
     components = pd.DataFrame(
         pca.components_, 
-        columns=tickers,
+        columns=tickers, # Assuming rets.columns gives the tickers
         index=[f"PC{i+1}" for i in range(pca.n_components_)]
     )
     
-    # Calculate explained variance
     explained_var = pd.Series(
         pca.explained_variance_ratio_,
         index=[f"PC{i+1}" for i in range(pca.n_components_)]
     )
     
-    # Interpret PC loadings
     pc_interpretations = {}
     for pc_idx, pc_name in enumerate(components.index):
         # Get top and bottom 3 contributors
@@ -953,50 +1087,42 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
     # Calculate risk contributions
     pc_scores = pd.DataFrame(
         pca_result,
-        index=rets.index,
+        index=valid_index, # Use the index of the data that was actually used for PCA
         columns=[f"PC{i+1}" for i in range(pca.n_components_)]
     )
     
     var_decomp = None
     if pca.n_components_ >= 1:
-        # Reconstruct returns using only the first PC for "systematic" risk
-        systematic_risk_scaled_pc1 = np.zeros_like(pca_result)
-        systematic_risk_scaled_pc1[:, 0] = pca_result[:, 0] # Keep only PC1 scores
+        # Reconstruct returns using ALL fitted principal components for "systematic" risk
+        systematic_reconstruction_scaled = pca.inverse_transform(pca_result)
         
-        # Inverse transform to get back to scaled returns space, explained by PC1
-        systematic_reconstruction_scaled = pca.inverse_transform(systematic_risk_scaled_pc1)
-        
-        # Inverse transform to original returns scale
         systematic_reconstruction_unscaled = pd.DataFrame(
             scaler.inverse_transform(systematic_reconstruction_scaled),
-            columns=tickers,
-            index=rets.index
+            columns=tickers, # Assuming rets.columns gives the tickers
+            index=valid_index # Use the index of the data that was actually used for PCA
         )
         
-        # Idiosyncratic risk is the original returns minus the part explained by PC1
-        idiosyncratic_risk_unscaled = rets - systematic_reconstruction_unscaled
+        # Align original returns to the valid_index for residual calculation
+        original_rets_aligned = rets.loc[valid_index]
+        idiosyncratic_risk_unscaled = original_rets_aligned - systematic_reconstruction_unscaled
         
-        # Calculate variances on the unscaled data
-        systematic_var = systematic_reconstruction_unscaled.var()
-        idiosyncratic_var = idiosyncratic_risk_unscaled.var()
-        total_portfolio_var = rets.var() # Variance of original returns
+        total_asset_variances = original_rets_aligned.var()
+        explained_variance_by_pcs = systematic_reconstruction_unscaled.var()
+        # residual_variance = idiosyncratic_risk_unscaled.var() # This is an alternative
 
-        # Avoid division by zero if total_portfolio_var is zero for any asset
-        systematic_pct = systematic_var.divide(total_portfolio_var, fill_value=0) * 100
-        idiosyncratic_pct = idiosyncratic_var.divide(total_portfolio_var, fill_value=0) * 100
+        # Calculate systematic percentage based on explained variance by PCs
+        systematic_pct = (explained_variance_by_pcs / total_asset_variances.replace(0, np.nan)).fillna(0) * 100
         
-        # Ensure they sum to 100% by adjusting idiosyncratic if needed (due to potential numerical precision)
-        # Forcing sum to 100, assuming systematic_pct is primary
-        idiosyncratic_pct = 100 - systematic_pct 
-        # Cap at 0 and 100
+        # Idiosyncratic is the remainder
+        idiosyncratic_pct = 100 - systematic_pct
+
         systematic_pct = systematic_pct.clip(0, 100)
         idiosyncratic_pct = idiosyncratic_pct.clip(0, 100)
-
 
         var_decomp = pd.DataFrame({
             "Systematic": systematic_pct,
             "Idiosyncratic": idiosyncratic_pct
-        }, index=tickers)
+        }, index=tickers) # Assuming tickers correspond to columns of original rets
     
     return {
         'components': components,
@@ -1006,185 +1132,9 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
         'pc_scores': pc_scores
     }
 
-# ───── Plots and Visualizations ─────
-
-def show_enhanced_corr(rets, annot=True, cmap='coolwarm'):
-    """Display correlation matrix with clustered heatmap"""
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    # Attempt to cluster for better visualization
-    corr = rets.corr()
-    
-    # Optional: hierarchical clustering for better visualization
-    try:
-        from scipy.cluster import hierarchy
-        from scipy.spatial import distance
-        
-        # Calculate distance matrix
-        dist = distance.pdist(corr)
-        link = hierarchy.linkage(dist, method='ward')
-        
-        # Get the cluster order
-        clust_order = hierarchy.dendrogram(link, no_plot=True)['leaves']
-        
-        # Reorder correlation matrix
-        corr = corr.iloc[clust_order, clust_order]
-    except:
-        # Fall back if clustering fails
-        pass
-    
-    # Plot as heatmap
-    im = ax.imshow(corr, vmin=-1, vmax=1, cmap=cmap)
-    
-    # Add annotations and labels
-    if annot and len(corr) <= 15:
-        for i in range(len(corr)):
-            for j in range(len(corr)):
-                val = corr.iloc[i, j]
-                color = 'white' if abs(val) > 0.7 else 'black'
-                ax.text(j, i, f'{val:.2f}', ha='center', va='center', color=color, fontsize=8)
-    
-    # Add labels and colorbar
-    ax.set_xticks(range(len(corr.columns)))
-    ax.set_xticklabels(corr.columns, rotation=90)
-    ax.set_yticks(range(len(corr.columns)))
-    ax.set_yticklabels(corr.columns)
-    
-    # Add decorations
-    plt.title("Asset Correlation Matrix")
-    plt.tight_layout()
-    fig.colorbar(im)
-    return fig, ax
-
-def show_roll_vol_enhanced(pr, window=252, secondary_window=63):
-    """rolling volatility plot with multiple windows"""
-    fig, ax = plt.subplots(figsize=(12, 5))
-    
-    # Calculate multiple rolling windows
-    vol_long = _roll(pr, window)
-    vol_short = _roll(pr, secondary_window)
-    
-    # Plot both
-    vol_long.plot(ax=ax, label=f'{window}-day')
-    vol_short.plot(ax=ax, label=f'{secondary_window}-day', linestyle='--')
-    
-    # Add historical average
-    avg_vol = vol_long.mean()
-    ax.axhline(y=avg_vol, color='r', linestyle='-', alpha=0.7, 
-               label=f'Avg: {avg_vol:.2%}')
-    
-    # Add +/- 1 std band around average
-    vol_std = vol_long.std()
-    ax.axhline(y=avg_vol + vol_std, color='r', linestyle=':', alpha=0.5,
-               label=f'+1σ: {avg_vol + vol_std:.2%}')
-    ax.axhline(y=max(0, avg_vol - vol_std), color='r', linestyle=':', alpha=0.5,
-               label=f'-1σ: {max(0, avg_vol - vol_std):.2%}')
-    
-    ax.set_title("Rolling Annualized Volatility Analysis")
-    ax.yaxis.set_major_formatter(PercentFormatter(1))
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    return fig, ax
-
-def plot_rolling_betas(rolling_betas, reg_results=None, significance_level=0.05):
-    """
-    Plot rolling factor exposures for the most significant factors.
-    If reg_results is provided, only show factors that are statistically significant at the specified level.
-    """
-    if rolling_betas is None or rolling_betas.empty:
-        return None, None
-    
-    # If regression results are provided, filter for significant factors
-    significant_factors = []
-    if reg_results is not None and 'pvalues' in reg_results:
-        significant_factors = reg_results['pvalues'][reg_results['pvalues'] <= significance_level].index.tolist()
-        
-        if len(significant_factors) == 0:
-            # If no factors are significant, use top factors by absolute magnitude
-            significant_factors = rolling_betas.abs().mean().nlargest(4).index.tolist()
-            
-        # Create plot only with significant factors
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        for factor in significant_factors:
-            if factor in rolling_betas.columns:
-                rolling_betas[factor].plot(ax=ax, label=f"{factor} (p={reg_results['pvalues'][factor]:.4f})")
-        
-        title_suffix = f"Significant at {(1-significance_level)*100:.0f}% Confidence"
-        ax.set_title(f"Rolling Factor Exposures ({title_suffix})")
-    else:
-        # Fallback to previous behavior if no regression results
-        # Select top factors by magnitude of average absolute value
-        top_factors = rolling_betas.abs().mean().nlargest(4).index.tolist()
-        
-        # Create plot
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        for factor in top_factors:
-            rolling_betas[factor].plot(ax=ax, label=factor)
-        
-        ax.set_title(f"Rolling Factor Exposures (Top Factors by Magnitude)")
-    
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Add horizontal line at zero
-    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-    
-    return fig, ax
-
-def plot_factor_contrib(factor_contrib, specific_var):
-    """Plot factor contribution to risk"""
-    # Calculate total risk
-    total_risk = factor_contrib.sum() + specific_var
-    
-    # Convert to percentages
-    factor_pct = (factor_contrib / total_risk * 100).sort_values(ascending=False)
-    specific_pct = specific_var / total_risk * 100
-    
-    # Create a complete series with specific risk
-    complete_contrib = factor_pct.copy()
-    complete_contrib["Specific"] = specific_pct
-    
-    # Plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    complete_contrib.plot(kind='bar', ax=ax)
-    
-    ax.set_title("Factor Contribution to Variance")
-    ax.set_ylabel("Percent of Total Variance (%)")
-    ax.grid(True, alpha=0.3)
-    
-    # Add a line for cumulative contribution
-    ax_right = ax.twinx()
-    cumul = complete_contrib.sort_values(ascending=False).cumsum()
-    cumul.plot(color='r', marker='o', linestyle='-', ax=ax_right)
-    ax_right.set_ylabel("Cumulative Contribution (%)")
-    
-    return fig, ax
-
-def plot_stress_tests(stress_results):
-    """Plot stress test results"""
-    if stress_results is None or len(stress_results) == 0:
-        return None, None
-    
-    # Sort by impact
-    sorted_results = stress_results.sort_values()
-    
-    # Create plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    colors = ['r' if x < 0 else 'g' for x in sorted_results]
-    sorted_results.plot(kind='barh', ax=ax, color=colors)
-    
-    ax.set_title("Factor Stress Test Results")
-    ax.set_xlabel("Portfolio Return Impact")
-    ax.xaxis.set_major_formatter(PercentFormatter(1))
-    ax.grid(True, alpha=0.3)
-    
-    return fig, ax
-
 # ───── Dashboard Core ─────
 
-def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Optional[pd.DataFrame] = None, factor_window: int = 126):
+def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Optional[pd.DataFrame] = None, factor_window: int = 126, factor_exposure_smoothing_window: int = 21):
     # Check for missing tickers and notify user
     miss = [t for t in weights.index if t not in prices.columns]
     if miss:
@@ -1311,13 +1261,16 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 specific_var_pct = reg_results['specific_var_pct']
                 
                 # Create detailed table
+                # Ensure non-negative values before sqrt for Annualized Vol Contribution
+                annualized_vol_contrib_values = np.sqrt(np.maximum(0, reg_results['factor_contrib']) * 252)
+                
                 contrib_df = pd.DataFrame({
                     'Variance Contribution': reg_results['factor_contrib'],
                     'Percent of Total': factor_contrib_pct * 100,
-                    'Annualized Vol Contribution': np.sqrt(reg_results['factor_contrib'] * 252)
+                    'Annualized Vol Contribution': annualized_vol_contrib_values
                 })
                 
-                # Add specific row
+                # Add specific row (specific_var should always be non-negative)
                 specific_data = pd.DataFrame({
                     'Variance Contribution': [reg_results['specific_var']],
                     'Percent of Total': [specific_var_pct * 100],
@@ -1463,7 +1416,13 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
         rolling_betas = calc_rolling_betas(port_r, factors, window=rolling_window)
         
         if rolling_betas is not None and not rolling_betas.empty:
-            fig_betas, _ = plot_rolling_betas(rolling_betas, reg_results=reg_results)
+            # Apply smoothing if window > 1
+            smoothed_rolling_betas = rolling_betas
+            if factor_exposure_smoothing_window > 1:
+                smoothed_rolling_betas = rolling_betas.rolling(window=factor_exposure_smoothing_window, min_periods=1).mean()
+                st.caption(f"Rolling exposures smoothed with a {factor_exposure_smoothing_window}-day moving average.")
+            
+            fig_betas, _ = plot_rolling_betas(smoothed_rolling_betas, reg_results=reg_results)
             if fig_betas:
                 st.pyplot(fig_betas)
             
@@ -1507,70 +1466,120 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     # 6. Attribution Analysis
     st.header("6. Performance Attribution")
     
+    exposures_for_attribution = None
+    attribution_type_message = ""
+
     if factors is not None and reg_results is not None:
-        # Calculate factor attribution
-        factor_attribution = calc_factor_attribution(port_r, 
-                                                  pd.DataFrame(reg_results['betas']).T.reindex(port_r.index), 
-                                                  factors)
-        
-        if factor_attribution is not None and not factor_attribution.empty:
-            # Calculate cumulative return attribution
-            cum_attribution = factor_attribution.cumsum()
+        # Prioritize rolling betas if available and valid
+        # Ensure 'rolling_betas' is in the local scope from section 5
+        if 'rolling_betas' in locals() and rolling_betas is not None and not rolling_betas.empty:
+            # Align rolling_betas with portfolio returns and factors
+            # Ensure factors used for attribution are present in rolling_betas columns
+            factors_for_attr = factors.loc[:, factors.columns.isin(rolling_betas.columns)]
+            common_idx_attr = port_r.index.intersection(rolling_betas.index).intersection(factors_for_attr.index)
             
-            # Plot cumulative attribution
-            st.subheader("Cumulative Return Attribution")
-            
-            if USE_PLOTLY:
-                # Interactive Plotly chart
-                fig = go.Figure()
-                
-                # Add each factor contribution
-                for col in cum_attribution.columns:
-                    fig.add_trace(go.Scatter(
-                        x=cum_attribution.index,
-                        y=cum_attribution[col],
-                        mode='lines',
-                        name=col,
-                        stackgroup='one'
-                    ))
-                
-                fig.update_layout(
-                    title="Cumulative Factor Attribution",
-                    xaxis_title="Date",
-                    yaxis_title="Cumulative Return",
-                    legend=dict(x=0.01, y=0.99, orientation="v"),
-                    height=500,
-                    margin=dict(l=40, r=40, t=50, b=40),
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
+            if not common_idx_attr.empty and not factors_for_attr.loc[common_idx_attr].empty:
+                exposures_for_attribution = rolling_betas.loc[common_idx_attr, factors_for_attr.columns]
+                # Ensure factors_for_attr is also sliced to common_idx_attr for the call
+                factors_arg_for_attribution = factors_for_attr.loc[common_idx_attr]
+                attribution_type_message = "Performance attribution is based on **rolling factor exposures**."
             else:
-                # Matplotlib fallback
-                fig, ax = plt.subplots(figsize=(12, 6))
-                cum_attribution.plot(kind='area', stacked=True, ax=ax)
-                ax.set_title("Cumulative Factor Attribution")
-                ax.set_ylabel("Cumulative Return")
-                ax.grid(True, alpha=0.3)
-                st.pyplot(fig)
+                st.warning("Could not align rolling betas with portfolio/factor returns for attribution. Falling back if possible.")
+                exposures_for_attribution = None # Reset to ensure fallback
+
+        # Fallback to static betas if rolling betas are not suitable or available
+        if exposures_for_attribution is None:
+            static_betas_series = reg_results.get('betas')
+            if static_betas_series is not None and not static_betas_series.empty:
+                # Ensure factors used for attribution are present in static_betas_series index
+                factors_for_attr = factors.loc[:, factors.columns.isin(static_betas_series.index)]
+                common_idx_attr = port_r.index.intersection(factors_for_attr.index)
+
+                if not common_idx_attr.empty and not factors_for_attr.loc[common_idx_attr].empty:
+                    # Create a DataFrame of static betas repeated for each date
+                    aligned_static_betas = pd.DataFrame(index=common_idx_attr, columns=static_betas_series.index.intersection(factors_for_attr.columns))
+                    for factor_name in aligned_static_betas.columns:
+                         aligned_static_betas[factor_name] = static_betas_series[factor_name]
+                    
+                    exposures_for_attribution = aligned_static_betas.ffill().bfill() 
+                    factors_arg_for_attribution = factors_for_attr.loc[common_idx_attr]
+                    attribution_type_message = "Performance attribution is based on **static full-period factor exposures** (rolling exposures unavailable or unaligned)."
+                else:
+                    st.error("Could not align static betas with portfolio/factor returns for attribution.")
+                    exposures_for_attribution = None # Ensure no attribution if alignment fails
+            else:
+                st.error("Static betas are missing from regression results. Cannot perform attribution.")
+                exposures_for_attribution = None
+
+
+        if exposures_for_attribution is not None and not exposures_for_attribution.empty and 'factors_arg_for_attribution' in locals():
+            st.info(attribution_type_message) # Inform user which betas are used
             
-            # Display attribution table
-            st.subheader("Return Attribution Summary")
+            # Align port_r for the call
+            port_r_for_attribution = port_r.loc[exposures_for_attribution.index]
+
+            factor_attribution = calc_factor_attribution(port_r_for_attribution,
+                                                      exposures_for_attribution,
+                                                      factors_arg_for_attribution) # Use aligned factors
             
-            # Calculate average daily contribution and percent of total
-            avg_contrib = factor_attribution.mean() * 252  # Annualized
-            total_return = avg_contrib.sum()
-            pct_contrib = avg_contrib / total_return if total_return != 0 else pd.Series(0, index=avg_contrib.index)
-            
-            # Create attribution table
-            attribution_summary = pd.DataFrame({
-                'Ann. Contribution': avg_contrib,
-                'Percent of Total': pct_contrib * 100
-            })
-            
-            st.dataframe(attribution_summary.style.format({
-                'Ann. Contribution': '{:.4%}',
-                'Percent of Total': '{:.2f}%'
-            }).background_gradient(cmap='RdYlGn', subset=['Ann. Contribution']))
+            if factor_attribution is not None and not factor_attribution.empty:
+                # Calculate cumulative return attribution
+                cum_attribution = factor_attribution.cumsum()
+                
+                # Plot cumulative attribution
+                st.subheader("Cumulative Return Attribution")
+                
+                if USE_PLOTLY:
+                    # Interactive Plotly chart
+                    fig = go.Figure()
+                    
+                    # Add each factor contribution
+                    for col in cum_attribution.columns:
+                        fig.add_trace(go.Scatter(
+                            x=cum_attribution.index,
+                            y=cum_attribution[col],
+                            mode='lines',
+                            name=col,
+                            stackgroup='one'
+                        ))
+                    
+                    fig.update_layout(
+                        title="Cumulative Factor Attribution",
+                        xaxis_title="Date",
+                        yaxis_title="Cumulative Return",
+                        legend=dict(x=0.01, y=0.99, orientation="v"),
+                        height=500,
+                        margin=dict(l=40, r=40, t=50, b=40),
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    # Matplotlib fallback
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    cum_attribution.plot(kind='area', stacked=True, ax=ax)
+                    ax.set_title("Cumulative Factor Attribution")
+                    ax.set_ylabel("Cumulative Return")
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+                
+                # Display attribution table
+                st.subheader("Return Attribution Summary")
+                
+                # Calculate average daily contribution and percent of total
+                avg_contrib = factor_attribution.mean() * 252  # Annualized
+                total_return = avg_contrib.sum()
+                pct_contrib = avg_contrib / total_return if total_return != 0 else pd.Series(0, index=avg_contrib.index)
+                
+                # Create attribution table
+                attribution_summary = pd.DataFrame({
+                    'Ann. Contribution': avg_contrib,
+                    'Percent of Total': pct_contrib * 100
+                })
+                
+                st.dataframe(attribution_summary.style.format({
+                    'Ann. Contribution': '{:.4%}',
+                    'Percent of Total': '{:.2f}%'
+                }).background_gradient(cmap='RdYlGn', subset=['Ann. Contribution']))
 
     # 7. Report Summary
     st.header("7. Risk Report Summary")
@@ -1696,7 +1705,6 @@ def main():
     
     # 2. Factor Analysis Settings
     st.sidebar.subheader("Factor Analysis Settings")
-    # Replace slider with numerical input
     factor_window = st.sidebar.number_input(
         "Factor Exposure Window (Trading Days)",
         min_value=30,
@@ -1704,6 +1712,14 @@ def main():
         value=126,
         step=21,
         help="Number of trading days used for calculating rolling factor exposures"
+    )
+    factor_exposure_smoothing_window = st.sidebar.number_input(
+        "Factor Exposure Smoothing Window (Days)",
+        min_value=1,  # Min value 1 means no smoothing effectively
+        max_value=126, 
+        value=21, 
+        step=1,
+        help="Number of days for smoothing rolling factor exposures. 1 means no smoothing."
     )
     
     # 3. Portfolio Input Method
@@ -1719,7 +1735,6 @@ def main():
     if input_method == "Manual Input":
         st.sidebar.markdown("Enter holdings (ticker and weight):")
         
-        # Initialize with a few default rows
         if 'portfolio_rows' not in st.session_state:
             st.session_state.portfolio_rows = [
                 {"ticker": "AAPL", "weight": 0.20},
@@ -1731,7 +1746,6 @@ def main():
                 {"ticker": "NVDA", "weight": 0.10}
             ]
         
-        # Add/remove row buttons
         col1, col2 = st.sidebar.columns(2)
         with col1:
             if st.button("➕ Add Row"):
@@ -1740,20 +1754,20 @@ def main():
             if st.button("➖ Remove Row") and len(st.session_state.portfolio_rows) > 1:
                 st.session_state.portfolio_rows.pop()
         
-        # Show current rows
         updated_rows = []
         for i, row in enumerate(st.session_state.portfolio_rows):
-            col1, col2 = st.sidebar.columns([2, 1])
-            with col1:
+            col1_input, col2_input = st.sidebar.columns([2, 1])
+            with col1_input:
                 ticker = st.text_input(f"Ticker {i+1}", value=row["ticker"], key=f"ticker_{i}")
-            with col2:
-                # Allow negative weights for short positions
-                weight = st.number_input(f"Weight {i+1}", min_value=-1.0, max_value=1.0, value=float(row["weight"]), step=0.01, key=f"weight_{i}")
-            updated_rows.append({"ticker": ticker, "weight": weight})
+            with col2_input:
+                weight_val = st.number_input(f"Weight {i+1}", min_value=-1.0, max_value=1.0, value=float(row["weight"]), step=0.01, key=f"weight_{i}")
+            updated_rows.append({"ticker": ticker, "weight": weight_val})
         
         st.session_state.portfolio_rows = updated_rows
-        weights = pd.Series({row["ticker"]: row["weight"] for row in updated_rows if row["ticker"] and row["weight"] != 0})
-    
+        weights = pd.Series({row["ticker"].strip().upper(): row["weight"] for row in updated_rows if row["ticker"].strip() and row["weight"] != 0})
+        if not weights.empty:
+            weights = (weights / weights.abs().sum()).sort_index()
+
     else:  # CSV Upload
         uploaded_file = st.sidebar.file_uploader(
             "Upload Portfolio CSV", 
@@ -1776,139 +1790,83 @@ def main():
         help="Choose your factor data source"
        )
     
-    factors = None
-    
-       
-    if factor_source == "Upload Factor CSV":
-        factor_file = st.sidebar.file_uploader(
-            "Upload Factor CSV",
-            type=["csv", "txt"],
-            help="Upload a CSV file with factors in columns and dates in rows"
-        )
-        
-        if factor_file:
-            factors = read_factor_file(factor_file, start_date)
-    
-    elif factor_source == "Online (Ken French + FRED)":
-        # This will be fetched during dashboard execution
-        pass
-    
-    elif factor_source == "Generate Synthetic Factors":
-        # This will be generated during dashboard execution
-        pass
-    
-    # Load price data
-    try:
-        # Instead of loading from CSV, we'll use yfinance for all price data loading
-        # We'll just pass a minimum set of default tickers to initialize the data
-        # The actual tickers will be loaded later based on the portfolio weights
-        default_tickers = ["SPY"]
-        prices = load_prices(default_tickers, start_date.strftime('%Y-%m-%d'))
-    except Exception as e:
-        st.error(f"Error loading price data: {str(e)}")
-        st.stop()
-    
-    # Display missing tickers warning if needed and try to download them
-    if weights is not None and len(weights) > 0:
-        # missing_tickers = [t for t in weights.index if t not in prices.columns]
-        missing_tickers = [t for t in weights.index]
+    factors = None # Initialize factors
+    prices_df = pd.DataFrame() # Initialize prices DataFrame
 
-        if missing_tickers:
-            st.warning(f"Price data not found in CSV for: {', '.join(missing_tickers)}")
-            
-            # Try to download missing data from yfinance
-            missing_data = download_missing_data(missing_tickers, start_date)
-            
-            if missing_data is not None and not missing_data.empty:
-                # Ensure the format matches our main price dataframe (with Close)
-                missing_tickers_found = list(missing_data.columns)
-                st.success(f"Successfully downloaded data for: {', '.join(missing_tickers_found)}")
-                
-                # Combine with existing price data
-                combined_prices = pd.concat([prices, missing_data], axis=1)
-                prices = combined_prices
-                
-                # Update missing tickers list
-                still_missing = [t for t in missing_tickers if t not in missing_data.columns]
-                if still_missing:
-                    st.warning(f"Still missing data for: {', '.join(still_missing)}")
-                    weights = weights.drop(still_missing)
-            else:
-                # If download failed, drop the missing tickers
-                weights = weights.drop(missing_tickers)
-    
-    # Check if we have valid weights to continue
-    if weights is not None and len(weights) > 0:
-        # Display current portfolio
+    # Proceed only if weights are defined
+    if weights is not None and not weights.empty:
         st.subheader("Current Portfolio")
-        
-        # Sort by absolute weight descending to show largest positions first
-        sorted_weights = weights.reindex(weights.abs().sort_values(ascending=False).index)
-        
-        # Display as a table
-        weight_df = pd.DataFrame({
-            "Weight": sorted_weights,
-            "Weight (%)": sorted_weights * 100
+        sorted_weights_display = weights.reindex(weights.abs().sort_values(ascending=False).index)
+        weight_df_display = pd.DataFrame({
+            "Weight": sorted_weights_display,
+            "Weight (%)": sorted_weights_display * 100
         })
-        
-        # Show total at the bottom
-        total_row = pd.DataFrame({
-            "Weight": [sorted_weights.sum()],
-            "Weight (%)": [sorted_weights.sum() * 100]
+        total_row_display = pd.DataFrame({
+
+            "Weight": [sorted_weights_display.sum()],
+            "Weight (%)": [sorted_weights_display.sum() * 100]
         }, index=["TOTAL"])
-        
-        combined_df = pd.concat([weight_df, total_row])
-        
-        st.dataframe(combined_df.style.format({
-            "Weight": "{:.4f}",
-            "Weight (%)": "{:.2f}%"
-        }))
-        
-        # Fetch online factors if selected
+        combined_df_display = pd.concat([weight_df_display, total_row_display])
+        st.dataframe(combined_df_display.style.format({"Weight": "{:.4f}", "Weight (%)": "{:.2f}%"}))
+
+        # --- Primary Price Data Loading ---
+        try:
+            st.info(f"Loading price data for {len(weights.index)} tickers in portfolio...")
+            all_portfolio_tickers = list(weights.index)
+            prices_df = load_prices(all_portfolio_tickers, start_date.strftime('%Y-%m-%d'))
+
+            if prices_df.empty and all_portfolio_tickers:
+                st.error("Failed to load price data for any tickers in the portfolio. Please check tickers and date range.")
+                st.stop()
+            
+            # --- Handle Tickers Not Loaded by yfinance ---
+            successfully_loaded_tickers = [col for col in prices_df.columns if col in all_portfolio_tickers]
+            failed_to_load_tickers = [t for t in all_portfolio_tickers if t not in successfully_loaded_tickers]
+
+            if failed_to_load_tickers:
+                st.warning(f"Could not load price data for: {', '.join(failed_to_load_tickers)}. These tickers will be removed from the analysis.")
+                weights = weights.drop(failed_to_load_tickers)
+                if weights.empty:
+                    st.error("No valid tickers remaining after attempting to load price data. Analysis cannot proceed.")
+                    st.stop()
+                weights = (weights / weights.abs().sum()).sort_index() # Re-normalize and sort
+                st.info("Portfolio weights have been re-normalized. Please review the updated portfolio above.")
+                # Re-display updated portfolio (Streamlit will handle this on the next rerun if weights object is changed)
+            
+            if prices_df.empty or weights.empty:
+                 st.error("Price data could not be loaded or no valid tickers remain. Analysis halted.")
+                 st.stop()
+
+        except Exception as e:
+            st.error(f"An critical error occurred while loading or processing price data: {str(e)}")
+            st.stop()
+
+        # --- Factor Loading/Generation ---
         if factor_source == "Online (Ken French + FRED)":
             with st.spinner("Fetching online factor data..."):
                 factors = fetch_online_factors(start_date.strftime('%Y-%m-%d'))
+        elif factor_source == "Upload Factor CSV":
+            factor_file = st.sidebar.file_uploader( # Uploader widget specific to this option
+                "Upload Factor CSV File",
+                type=["csv", "txt"],
+                help="Upload a CSV file with factors in columns and dates in rows"
+            )
+            if factor_file:
+                factors = read_factor_file(factor_file, start_date.strftime('%Y-%m-%d'))
+        elif factor_source == "Generate Synthetic Factors":
+            if prices_df.empty:
+                st.error("Cannot generate synthetic factors without price data. Ensure portfolio tickers are valid.")
+                st.stop()
+            factors = generate_advanced_factors(prices_df, start_date.strftime('%Y-%m-%d'))
         
-        # Ensure the 'start' argument is passed to the load_prices function consistently
-        prices = load_prices(list(weights.index), start_date.strftime('%Y-%m-%d'))
-
-        # Run the dashboard
-        dashboard(weights, prices, start_date.strftime('%Y-%m-%d'), factors, factor_window)
-    else:
-        st.info("Please enter valid portfolio holdings to begin analysis.")
-
-def download_missing_data(tickers, start_date):
-    """
-    Download price data for tickers missing from the CSV file using yfinance
-    """
-    try:
-        import yfinance as yf
-        st.info(f"Downloading data for {len(tickers)} tickers using yfinance...")
-        
-        # Download data with auto_adjust=True which puts adjusted prices in 'Close' column
-        data = yf.download(tickers, start=start_date, auto_adjust=True)
-        
-        if not data.empty:
-            if len(tickers) == 1:
-                # For a single ticker, yfinance returns a different format
-                prices = data['Close'].to_frame(tickers[0])
-            else:
-                # For multiple tickers, we get a MultiIndex DataFrame
-                prices = data['Close']
-                
-            # Make sure the column names match exactly the ticker names in weights
-            # This ensures proper alignment for the dot product operation
-            prices.columns = [col.upper() if isinstance(col, str) else col for col in prices.columns]
-            
-            st.success(f"Successfully downloaded data for {len(prices.columns)} tickers")
-            return prices
+        # --- Run Dashboard ---
+        if not prices_df.empty and weights is not None and not weights.empty:
+            dashboard(weights, prices_df, start_date.strftime('%Y-%m-%d'), factors, factor_window, factor_exposure_smoothing_window)
         else:
-            st.warning("No data returned from yfinance")
-            return None
-        
-    except Exception as e:
-        st.error(f"Error downloading data from yfinance: {str(e)}")
-        return None
+            st.info("Analysis could not proceed. Please check portfolio holdings and ensure price data can be loaded.")
+
+    else: # weights is None or empty initially
+        st.info("Please enter or upload valid portfolio holdings to begin analysis.")
 
 if __name__ == "__main__":
     main()
