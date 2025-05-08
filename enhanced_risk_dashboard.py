@@ -91,7 +91,7 @@ MACRO_FRED = {
     "USD_Index": "DTWEXBGS",
     "WTI_Oil": "DCOILWTICO",
     "CPI": "CPIAUCSL",
-    "VIX": "VIXCLS",  
+    "VIX": "VIXCLS",  # Will be converted to VIX_Diff
     "TED_Spread": "TEDRATE", # TED spread (3m Libor - 3m T-bill)
     "Credit_Spread": "BAA10Y", # Moody's BAA - 10Y Treasury
     "Unemployment": "UNRATE"
@@ -99,10 +99,10 @@ MACRO_FRED = {
 
 # Categorized factor groups
 FACTOR_GROUPS = {
-    "Traditional": ["MKT", "SMB", "HML", "UMD", "RMW", "CMA"],
-    "Style": ["Value", "Size", "Momentum", "Quality", "Low_Vol", "Growth"],
-    "Macro": ["Yield_Curve", "USD_Index", "WTI_Oil", "VIX", "Credit_Spread", "TED_Spread"],
-    "Smart Beta": ["Min_Vol", "Max_Div", "Equal_Weight", "Quality_Tilt", "ESG_Tilt"]
+    "Traditional": ["Mkt-RF", "SMB", "HML", "UMD", "RMW", "CMA"],
+    "Style": ["Value", "Size", "Momentum", "Quality", "Low_Vol", "Growth"], # Synthetic factors
+    "Macro": ["Yield_Curve_Diff", "USD_Index", "WTI_Oil", "VIX_Diff", "Credit_Spread_Diff", "TED_Spread_Diff", "CPI"], # Standardized names
+    "Smart Beta": ["Min_Vol", "Max_Div", "Equal_Weight", "Quality_Tilt", "ESG_Tilt"] # Synthetic factors
 }
 
 # Confidence levels for risk metrics
@@ -419,71 +419,28 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
     macro_data = None
     momentum_data = None
     
-    # # Try to fetch Fama-French 5 factor data
-    # try:
-    #     with st.sidebar.expander("Fama-French Factor Fetch"):
-    #         st.info("Attempting to fetch Fama-French factors...")
-    #         # Fix FutureWarning by not relying on date_parser
-    #         raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "fred", start=start)
-    #         # Convert index to datetime after fetching if needed
-    #         ff = raw_data[0] / 100
-    #         ff.index = pd.to_datetime(ff.index)
-    #         ff.index = ff.index.tz_localize(None)
-    #         ff.rename(columns=FF5_MAP, inplace=True)
-    #         ff = ff.loc[ff.index >= pd.to_datetime(start)]
-    #         st.success(f"Successfully fetched {len(ff)} rows of Fama-French 5 factor data")
-    #         st.write(ff.tail())
-    #         ff_data = ff
-    # except Exception as e:
-    #     st.sidebar.error(f"Failed to fetch Fama-French data: {str(e)}")
-    
+    # Try to fetch Fama-French 5 factor data
     try:
-        with st.sidebar.expander("Fama‑French Factor Fetch"):
-            st.info("Attempting to fetch Fama‑French 5‑factor data (HTTPS)…")
-
-            # ------------------------------------------------------------------
-            # Direct HTTPS download of the ZIP file
-            url = (
-                "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/"
-                "ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
-            )
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()                        # network / HTTP errors
-
-            # ------------------------------------------------------------------
-            # Read the first CSV inside the ZIP
-            with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                ff_raw = pd.read_csv(
-                    zf.open(zf.namelist()[0]),
-                    skiprows=3,              # skip header lines
-                    index_col=0              # date column becomes index
-                )
-
-            # ------------------------------------------------------------------
-            # Clean & format
-            ff_raw.index = pd.to_datetime(ff_raw.index, format="%Y%m%d")
-            ff_raw = ff_raw.iloc[:, :5] / 100            # keep 5 factors, scale
-            ff_raw.rename(columns=FF5_MAP, inplace=True)
-
-            ff_data = ff_raw.loc[ff_raw.index >= pd.to_datetime(start)]
-
-            st.success(f"Successfully fetched {len(ff_data)} daily rows")
-            st.dataframe(ff_data.tail())
-
+        with st.sidebar.expander("Fama-French Factor Fetch"):
+            st.info("Attempting to fetch Fama-French factors...")
+            raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "famafrench", start=start)
+            ff = raw_data[0] / 100
+            ff.index = pd.to_datetime(ff.index).tz_localize(None)
+            ff.rename(columns=FF5_MAP, inplace=True) # FF5_MAP renames MKT to Mkt-RF
+            ff = ff.loc[ff.index >= pd.to_datetime(start)]
+            st.success(f"Successfully fetched {len(ff)} rows of Fama-French 5 factor data")
+            st.write(ff.tail())
+            ff_data = ff
     except Exception as e:
-        st.sidebar.error(f"Failed to fetch Fama‑French data: {e}")
-        ff_data = None
-
-
+        st.sidebar.error(f"Failed to fetch Fama-French data: {str(e)}")
+    
     # Try to fetch Momentum factor separately
     try:
         with st.sidebar.expander("Momentum Factor Fetch"):
             st.info("Attempting to fetch Momentum factor...")
-            # Fix FutureWarning by not relying on date_parser
             raw_data = pdr.DataReader("F-F_Momentum_Factor_daily", "famafrench", start=start)
             mom = raw_data[0] / 100
-            mom.index = pd.to_datetime(mom.index)
-            mom.index = mom.index.tz_localize(None)
+            mom.index = pd.to_datetime(mom.index).tz_localize(None)
             mom.rename(columns={"Mom   ": "UMD"}, inplace=True)
             mom = mom.loc[mom.index >= pd.to_datetime(start)]
             st.success(f"Successfully fetched {len(mom)} rows of Momentum factor data")
@@ -496,47 +453,65 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
     try:
         with st.sidebar.expander("FRED Macro Data Fetch"):
             st.info("Attempting to fetch FRED macro data...")
-            # Fetch one by one for better error isolation
             macro_dfs = []
             for name, ticker in MACRO_FRED.items():
                 try:
                     df = pdr.DataReader(ticker, "fred", start)
                     df.rename(columns={ticker: name}, inplace=True)
                     macro_dfs.append(df)
-                    st.write(f"✅ {name}: {len(df)} rows")
+                    st.write(f"✅ {name} ({ticker}): {len(df)} rows")
                 except Exception as e:
-                    st.write(f"❌ {name}: {str(e)}")
+                    st.write(f"❌ {name} ({ticker}): {str(e)}")
             
             if macro_dfs:
                 macro = pd.concat(macro_dfs, axis=1)
-                # Handle non-trading days differently for macro data - fix deprecated method
                 macro = macro.asfreq('B').ffill()
+
+                cols_to_keep_final = []
+                processed_cols_for_debug = []
+
+                # Handle VIX specifically: calculate VIX_Diff
+                if "VIX" in macro.columns:
+                    macro["VIX_Diff"] = macro["VIX"].diff()
+                    cols_to_keep_final.append("VIX_Diff")
+                    processed_cols_for_debug.append("VIX (to VIX_Diff)")
                 
-                # Create first differences for yield series
-                rate_cols = [col for col in macro.columns if 'Yield' in col or 'Spread' in col]
-                for col in rate_cols:
-                    if col in macro.columns:
-                        macro[f"{col}_Diff"] = macro[col].diff()
+                # Handle rate and spread columns: calculate _Diff
+                rate_cols_orig_names = [name for name in MACRO_FRED if 'Yield' in name or 'Spread' in name]
                 
-                # Calculate returns for others
-                non_rate_cols = [col for col in macro.columns if col not in rate_cols 
-                              and not col.endswith('_Diff')]
-                for col in non_rate_cols:
-                    if col in macro.columns:
-                        macro[col] = macro[col].pct_change()
+                for col_name in rate_cols_orig_names:
+                    if col_name in macro.columns:
+                        macro[f"{col_name}_Diff"] = macro[col_name].diff()
+                        cols_to_keep_final.append(f"{col_name}_Diff")
+                        processed_cols_for_debug.append(f"{col_name} (to {col_name}_Diff)")
+
+                # Handle other columns (e.g., CPI, USD_Index, WTI_Oil): calculate pct_change()
+                other_cols_for_pct_change = [
+                    col for col in macro.columns 
+                    if col != "VIX" and col not in rate_cols_orig_names and not col.endswith("_Diff")
+                ]
+                for col_name in other_cols_for_pct_change:
+                    if col_name in macro.columns:
+                         macro[col_name] = macro[col_name].pct_change()
+                         cols_to_keep_final.append(col_name)
+                         processed_cols_for_debug.append(f"{col_name} (to pct_change)")
                 
-                # Drop original yield columns to keep only changes
-                macro = macro.drop(columns=rate_cols)
-                # Fix deprecated ffill method
-                macro = macro.ffill().dropna()
-                
-                st.success(f"Successfully fetched {len(macro)} rows of FRED data")
-                st.write(macro.tail())
-                macro_data = macro
+                cols_to_keep_final = sorted(list(set(cols_to_keep_final))) # Ensure unique and sorted
+                if cols_to_keep_final:
+                    macro = macro[cols_to_keep_final]
+                    macro = macro.ffill().dropna()
+                    st.success(f"Successfully processed {len(macro.columns)} macro series from FRED.")
+                    st.write(f"Processed columns for FRED: {', '.join(macro.columns)}") # Show final columns
+                    st.write(macro.tail())
+                    macro_data = macro
+                else:
+                    st.warning("No macro columns were processed or kept.")
+                    macro_data = pd.DataFrame() # Empty DataFrame if nothing to keep
             else:
                 st.error("Failed to fetch any FRED data series")
     except Exception as e:
         st.sidebar.error(f"Failed to fetch FRED data: {str(e)}")
+        st.sidebar.expander("FRED Error Details").write(traceback.format_exc())
     
     # Combine all factors
     all_dfs = []
@@ -875,16 +850,19 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
     """
     Run comprehensive stress tests based on factor exposures and historical scenarios
     """
-    # 1. Historical worst case scenarios
+    # 1. Historical worst case scenarios (based on actual factor data)
     factor_quantiles = {}
-    for q in [0.01, 0.05, 0.10]:
-        factor_quantiles[f"Historical_{int(q*100)}pct"] = factors.quantile(q)
+    for q in [0.01, 0.05, 0.10]: # 1%, 5%, 10% worst historical daily changes/returns
+        # Ensure factors used here are the same as in betas.index
+        relevant_factors = factors[betas.index.intersection(factors.columns)]
+        factor_quantiles[f"Historical_{int(q*100)}pct"] = relevant_factors.quantile(q)
     
-    # 2. Custom stress scenarios
+    # 2. Custom stress scenarios (shocks are applied to the relevant factor names)
+    # Ensure factor names here match those in your 'factors' DataFrame and 'betas' Series
     custom_scenarios = {
-        "Market_Crash": {"MKT": -0.05, "VIX_Diff": 0.15},
-        "Rate_Shock": {"10Y_Yield_Diff": 0.005, "2Y_Yield_Diff": 0.010},
-        "Inflation_Spike": {"CPI": 0.01, "10Y_Yield_Diff": 0.003},
+        "Market_Crash": {"Mkt-RF": -0.07, "VIX_Diff": 15},  # Mkt-RF shock, VIX_Diff shock (15 point VIX increase)
+        "Rate_Shock": {"10Y_Yield_Diff": 0.005, "2Y_Yield_Diff": 0.010}, # 0.5% and 1% increase in yield changes
+        "Inflation_Spike": {"CPI": 0.01, "10Y_Yield_Diff": 0.003}, # 1% CPI shock, 0.3% 10Y yield change shock
         "Value_Rotation": {"HML": 0.02, "UMD": -0.015},
         "Growth_Rally": {"HML": -0.02, "UMD": 0.02},
         "Credit_Crisis": {"Credit_Spread_Diff": 0.004, "TED_Spread_Diff": 0.003}
@@ -893,15 +871,15 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
     # 3. Combined stress scenarios
     combined_scenarios = {
         "Stagflation": {
-            "MKT": -0.02,
-            "CPI": 0.008,
+            "Mkt-RF": -0.02,
+            "CPI": 0.008, # 0.8% CPI shock
             "10Y_Yield_Diff": 0.003,
-            "USD_Index": 0.01
+            "USD_Index": 0.01 # 1% USD Index shock
         },
         "Risk_Aversion": {
-            "MKT": -0.03,
+            "Mkt-RF": -0.03,
             "SMB": -0.01,
-            "VIX_Diff": 0.10,
+            "VIX_Diff": 10, # VIX_Diff shock (10 point VIX increase)
             "Credit_Spread_Diff": 0.002
         }
     }
