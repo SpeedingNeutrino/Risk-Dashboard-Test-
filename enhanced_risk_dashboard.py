@@ -424,7 +424,7 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
         with st.sidebar.expander("Fama-French Factor Fetch"):
             st.info("Attempting to fetch Fama-French factors...")
             # Fix FutureWarning by not relying on date_parser
-            raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "famafrench", start=start)
+            raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "fred", start=start)
             # Convert index to datetime after fetching if needed
             ff = raw_data[0] / 100
             ff.index = pd.to_datetime(ff.index)
