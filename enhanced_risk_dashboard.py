@@ -1285,7 +1285,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     st.header("2. Correlation Analysis")
     st.subheader("Asset Correlation")
     fig_corr, _ = show_enhanced_corr(rets)
-    st.pyplot(fig)
+    st.pyplot(fig_corr)
 
     st.header("3. Volatility Analysis")
     st.subheader("Rolling Volatility")
