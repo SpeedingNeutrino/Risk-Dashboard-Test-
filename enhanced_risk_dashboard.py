@@ -583,7 +583,7 @@ def generate_advanced_factors(prices: pd.DataFrame, start_date: str) -> pd.DataF
             if len(returns[col].dropna()) > 20:
                 X = sm.add_constant(market.iloc[:60])
                 model = sm.OLS(returns[col].iloc[:60], X).fit()
-                betas[col] = model.params[1]  # Market beta
+                betas[col] = model.params.iloc[1]   # Market beta
         
         beta_series = pd.Series(betas)
         defensive = beta_series < beta_series.median()
