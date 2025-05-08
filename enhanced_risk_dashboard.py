@@ -18,14 +18,14 @@ Features:
 """
 
 from __future__ import annotations
-
+import requests
 import io
 import sys
 import json
 import traceback
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Union, Any
-
+import zipfile
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -419,24 +419,62 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
     macro_data = None
     momentum_data = None
     
-    # Try to fetch Fama-French 5 factor data
-    try:
-        with st.sidebar.expander("Fama-French Factor Fetch"):
-            st.info("Attempting to fetch Fama-French factors...")
-            # Fix FutureWarning by not relying on date_parser
-            raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "fred", start=start)
-            # Convert index to datetime after fetching if needed
-            ff = raw_data[0] / 100
-            ff.index = pd.to_datetime(ff.index)
-            ff.index = ff.index.tz_localize(None)
-            ff.rename(columns=FF5_MAP, inplace=True)
-            ff = ff.loc[ff.index >= pd.to_datetime(start)]
-            st.success(f"Successfully fetched {len(ff)} rows of Fama-French 5 factor data")
-            st.write(ff.tail())
-            ff_data = ff
-    except Exception as e:
-        st.sidebar.error(f"Failed to fetch Fama-French data: {str(e)}")
+    # # Try to fetch Fama-French 5 factor data
+    # try:
+    #     with st.sidebar.expander("Fama-French Factor Fetch"):
+    #         st.info("Attempting to fetch Fama-French factors...")
+    #         # Fix FutureWarning by not relying on date_parser
+    #         raw_data = pdr.DataReader("F-F_Research_Data_5_Factors_2x3_daily", "fred", start=start)
+    #         # Convert index to datetime after fetching if needed
+    #         ff = raw_data[0] / 100
+    #         ff.index = pd.to_datetime(ff.index)
+    #         ff.index = ff.index.tz_localize(None)
+    #         ff.rename(columns=FF5_MAP, inplace=True)
+    #         ff = ff.loc[ff.index >= pd.to_datetime(start)]
+    #         st.success(f"Successfully fetched {len(ff)} rows of Fama-French 5 factor data")
+    #         st.write(ff.tail())
+    #         ff_data = ff
+    # except Exception as e:
+    #     st.sidebar.error(f"Failed to fetch Fama-French data: {str(e)}")
     
+    try:
+        with st.sidebar.expander("Fama‑French Factor Fetch"):
+            st.info("Attempting to fetch Fama‑French 5‑factor data (HTTPS)…")
+
+            # ------------------------------------------------------------------
+            # Direct HTTPS download of the ZIP file
+            url = (
+                "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/"
+                "ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
+            )
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()                        # network / HTTP errors
+
+            # ------------------------------------------------------------------
+            # Read the first CSV inside the ZIP
+            with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+                ff_raw = pd.read_csv(
+                    zf.open(zf.namelist()[0]),
+                    skiprows=3,              # skip header lines
+                    index_col=0              # date column becomes index
+                )
+
+            # ------------------------------------------------------------------
+            # Clean & format
+            ff_raw.index = pd.to_datetime(ff_raw.index, format="%Y%m%d")
+            ff_raw = ff_raw.iloc[:, :5] / 100            # keep 5 factors, scale
+            ff_raw.rename(columns=FF5_MAP, inplace=True)
+
+            ff_data = ff_raw.loc[ff_raw.index >= pd.to_datetime(start)]
+
+            st.success(f"Successfully fetched {len(ff_data)} daily rows")
+            st.dataframe(ff_data.tail())
+
+    except Exception as e:
+        st.sidebar.error(f"Failed to fetch Fama‑French data: {e}")
+        ff_data = None
+
+
     # Try to fetch Momentum factor separately
     try:
         with st.sidebar.expander("Momentum Factor Fetch"):
