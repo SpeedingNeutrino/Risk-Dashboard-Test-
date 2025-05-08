@@ -1499,40 +1499,66 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                         significant_factors_to_plot = [] # MODIFIED BLOCK - END
             
             if significant_factors_to_plot and factors is not None:
-                st.subheader(f"Cumulative Factor Returns (Rolling {factor_rolling_return_window}-Day Sum)")
+                # MODIFIED: Changed subheader to reflect rolling compounded returns
+                st.subheader(f"Rolling {factor_rolling_return_window}-Day Compounded Factor Returns") 
                 
-                # Ensure only factors present in the 'factors' DataFrame are used
-                available_factors_for_plot = [f for f in significant_factors_to_plot if f in factors.columns]
+                # Define factors to exclude from compounding calculation
+                EXCLUDE_FROM_COMPOUNDING_SUFFIXES = ['_Diff']
+                EXCLUDE_FROM_COMPOUNDING_EXACT = ['CPI', 'USD_Index', 'Unemployment', 'VIX'] # VIX level, not typically compounded
+
+                # Filter the significant_factors_to_plot to get only those suitable for compounding
+                factors_suitable_for_compounding = []
+                for factor_name in significant_factors_to_plot:
+                    if factor_name in factors.columns: # Ensure factor exists
+                        is_excluded = False
+                        if any(factor_name.endswith(suffix) for suffix in EXCLUDE_FROM_COMPOUNDING_SUFFIXES):
+                            is_excluded = True
+                        if factor_name in EXCLUDE_FROM_COMPOUNDING_EXACT:
+                            is_excluded = True
+                        
+                        if not is_excluded:
+                            factors_suitable_for_compounding.append(factor_name)
+                
+                available_factors_for_plot = factors_suitable_for_compounding # Use the filtered list
 
                 if available_factors_for_plot:
+                    # Align factors with portfolio returns index and select relevant factors
                     aligned_factors_for_plot = factors.loc[port_r.index.intersection(factors.index), available_factors_for_plot]
                     
                     if not aligned_factors_for_plot.empty:
-                        rolling_factor_returns_sum = aligned_factors_for_plot.rolling(window=factor_rolling_return_window, min_periods=max(1, factor_rolling_return_window // 2)).sum().dropna()
+                        # MODIFIED CALCULATION: Calculate rolling compounded returns
+                        # Add 1 to returns to get growth factors
+                        growth_factors = 1 + aligned_factors_for_plot
+                        # Calculate rolling product of growth factors
+                        rolling_compounded_growth = growth_factors.rolling(window=factor_rolling_return_window, min_periods=max(1, factor_rolling_return_window // 2)).apply(np.prod, raw=True)
+                        # Subtract 1 to get compounded returns
+                        rolling_compounded_factor_returns = rolling_compounded_growth - 1
                         
-                        if not rolling_factor_returns_sum.empty:
-                            # Use Plotly for cumulative factor returns (already updated in previous step)
+                        rolling_compounded_factor_returns = rolling_compounded_factor_returns.dropna(how='all')
+                        
+                        if not rolling_compounded_factor_returns.empty:
                             fig_cum_factor_returns = go.Figure()
-                            for factor in rolling_factor_returns_sum.columns:
-                                fig_cum_factor_returns.add_trace(go.Scatter(x=rolling_factor_returns_sum.index, y=rolling_factor_returns_sum[factor], mode='lines', name=factor))
+                            for factor in rolling_compounded_factor_returns.columns:
+                                fig_cum_factor_returns.add_trace(go.Scatter(x=rolling_compounded_factor_returns.index, y=rolling_compounded_factor_returns[factor], mode='lines', name=factor))
                             
                             fig_cum_factor_returns.update_layout(
-                                title=f"Cumulative Factor Returns (Rolling {factor_rolling_return_window}-Day Sum)",
+                                # MODIFIED TITLE
+                                title=f"Rolling {factor_rolling_return_window}-Day Compounded Factor Returns", 
                                 xaxis_title="Date",
-                                yaxis_title="Cumulative Return",
+                                yaxis_title="Rolling Compounded Return", # MODIFIED Y-AXIS
                                 legend_title_text='Factors',
                                 height=500,
                                 margin=dict(l=50, r=50, t=80, b=50),
                             )
                             st.plotly_chart(fig_cum_factor_returns, use_container_width=True)
                         else:
-                            st.info("No data available for cumulative factor returns plot after rolling sum.")
+                            st.info(f"No data available for rolling {factor_rolling_return_window}-day compounded factor returns plot (possibly due to filtering or data issues).")
                     else:
-                        st.info("Could not align selected factors with portfolio returns for the cumulative plot.")
+                        st.info("Could not align selected factors (suitable for compounding) with portfolio returns for the rolling compounded returns plot.")
                 else:
-                    st.info("None of the selected factors for the cumulative plot are available in the factor data.")
+                    st.info("None of the selected significant factors are suitable for a compounded return calculation (e.g., they are differences or levels like CPI, VIX_Diff).")
             elif not significant_factors_to_plot:
-                st.info("No significant factors identified to plot cumulative returns.")
+                st.info("No significant factors identified to plot rolling compounded returns.")
 
             # Factor timing analysis
             st.subheader("Factor Timing Analysis")
