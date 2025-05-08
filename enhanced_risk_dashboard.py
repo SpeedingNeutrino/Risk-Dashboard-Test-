@@ -857,30 +857,28 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
         relevant_factors = factors[betas.index.intersection(factors.columns)]
         factor_quantiles[f"Historical_{int(q*100)}pct"] = relevant_factors.quantile(q)
     
-    # 2. Custom stress scenarios (shocks are applied to the relevant factor names)
-    # Ensure factor names here match those in your 'factors' DataFrame and 'betas' Series
+
     custom_scenarios = {
         "Market_Crash": {"Mkt-RF": -0.07, "VIX_Diff": 15},  # Mkt-RF shock, VIX_Diff shock (15 point VIX increase)
         "Rate_Shock": {"10Y_Yield_Diff": 0.005, "2Y_Yield_Diff": 0.010}, # 0.5% and 1% increase in yield changes
         "Inflation_Spike": {"CPI": 0.01, "10Y_Yield_Diff": 0.003}, # 1% CPI shock, 0.3% 10Y yield change shock
-        "Value_Rotation": {"HML": 0.02, "UMD": -0.015},
-        "Growth_Rally": {"HML": -0.02, "UMD": 0.02},
-        "Credit_Crisis": {"Credit_Spread_Diff": 0.004, "TED_Spread_Diff": 0.003}
+        "Value_Rotation": {"HML": 0.02, "UMD": -0.015}, # Value outperformance, momentum underperformance
+        "Growth_Rally": {"HML": -0.02, "UMD": 0.02}, # Growth outperformance, momentum outperformance
+        "Credit_Crisis": {"Credit_Spread_Diff": 0.004, "TED_Spread_Diff": 0.003} # 0.4% and 0.3% increase in spreads
     }
-    
-    # 3. Combined stress scenarios
+
     combined_scenarios = {
         "Stagflation": {
-            "Mkt-RF": -0.02,
+            "Mkt-RF": -0.02, # 2% market drop
             "CPI": 0.008, # 0.8% CPI shock
-            "10Y_Yield_Diff": 0.003,
+            "10Y_Yield_Diff": 0.003, # 0.3% yield shock
             "USD_Index": 0.01 # 1% USD Index shock
         },
         "Risk_Aversion": {
-            "Mkt-RF": -0.03,
-            "SMB": -0.01,
-            "VIX_Diff": 10, # VIX_Diff shock (10 point VIX increase)
-            "Credit_Spread_Diff": 0.002
+            "Mkt-RF": -0.03, # 3% market drop
+            "SMB": -0.01, # 1% small cap underperformance
+            "VIX_Diff": 10, # 10 point VIX increase
+            "Credit_Spread_Diff": 0.002 # 0.2% increase in credit spreads
         }
     }
     
@@ -908,8 +906,8 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
     """
     Run advanced PCA with rotation interpretation and risk decomposition
     """
-    if len(rets) < 2*len(tickers):
-        st.warning("Not enough data points for reliable PCA analysis")
+    if len(rets) < 2*len(tickers) or len(rets) < n_components: # Ensure enough data
+        st.warning("Not enough data points for reliable PCA analysis given the number of tickers/components.")
         return None
     
     # Standardize returns
@@ -917,7 +915,13 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
     scaled_rets = scaler.fit_transform(rets)
     
     # Run PCA
-    pca = PCA(n_components=min(n_components, len(tickers), len(rets)))
+    # Ensure n_components is not more than available features or samples
+    actual_n_components = min(n_components, scaled_rets.shape[0], scaled_rets.shape[1])
+    if actual_n_components < 1:
+        st.warning("Cannot run PCA with less than 1 component.")
+        return None
+
+    pca = PCA(n_components=actual_n_components)
     pca_result = pca.fit_transform(scaled_rets)
     
     # Extract components and loadings
@@ -935,12 +939,13 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
     
     # Interpret PC loadings
     pc_interpretations = {}
-    for pc in components.index:
+    for pc_idx, pc_name in enumerate(components.index):
         # Get top and bottom 3 contributors
-        top_pos = components.loc[pc].nlargest(3)
-        top_neg = components.loc[pc].nsmallest(3)
+        loadings_series = components.loc[pc_name]
+        top_pos = loadings_series.nlargest(3)
+        top_neg = loadings_series.nsmallest(3)
         
-        pc_interpretations[pc] = {
+        pc_interpretations[pc_name] = {
             "positive": list(zip(top_pos.index, top_pos.values)),
             "negative": list(zip(top_neg.index, top_neg.values))
         }
@@ -952,31 +957,46 @@ def run_advanced_pca(rets: pd.DataFrame, tickers: list, n_components: int = 5) -
         columns=[f"PC{i+1}" for i in range(pca.n_components_)]
     )
     
-    # Reconstruct with only first PC to see systematic risk
+    var_decomp = None
     if pca.n_components_ >= 1:
-        systematic_risk = pca.inverse_transform(
-            np.column_stack([pc_scores.iloc[:, 0], np.zeros((len(pc_scores), pca.n_components_ - 1))])
-        )
-        systematic_risk = pd.DataFrame(systematic_risk, columns=tickers, index=rets.index)
+        # Reconstruct returns using only the first PC for "systematic" risk
+        systematic_risk_scaled_pc1 = np.zeros_like(pca_result)
+        systematic_risk_scaled_pc1[:, 0] = pca_result[:, 0] # Keep only PC1 scores
         
-        # Calculate idiosyncratic risk (residual)
-        idiosyncratic_risk = rets - pd.DataFrame(
-            scaler.inverse_transform(systematic_risk), 
-            columns=tickers, 
+        # Inverse transform to get back to scaled returns space, explained by PC1
+        systematic_reconstruction_scaled = pca.inverse_transform(systematic_risk_scaled_pc1)
+        
+        # Inverse transform to original returns scale
+        systematic_reconstruction_unscaled = pd.DataFrame(
+            scaler.inverse_transform(systematic_reconstruction_scaled),
+            columns=tickers,
             index=rets.index
         )
         
-        # Variance ratio of systematic vs idiosyncratic
-        systematic_var = systematic_risk.var()
-        idiosyncratic_var = idiosyncratic_risk.var()
-        total_var = rets.var()
+        # Idiosyncratic risk is the original returns minus the part explained by PC1
+        idiosyncratic_risk_unscaled = rets - systematic_reconstruction_unscaled
         
+        # Calculate variances on the unscaled data
+        systematic_var = systematic_reconstruction_unscaled.var()
+        idiosyncratic_var = idiosyncratic_risk_unscaled.var()
+        total_portfolio_var = rets.var() # Variance of original returns
+
+        # Avoid division by zero if total_portfolio_var is zero for any asset
+        systematic_pct = systematic_var.divide(total_portfolio_var, fill_value=0) * 100
+        idiosyncratic_pct = idiosyncratic_var.divide(total_portfolio_var, fill_value=0) * 100
+        
+        # Ensure they sum to 100% by adjusting idiosyncratic if needed (due to potential numerical precision)
+        # Forcing sum to 100, assuming systematic_pct is primary
+        idiosyncratic_pct = 100 - systematic_pct 
+        # Cap at 0 and 100
+        systematic_pct = systematic_pct.clip(0, 100)
+        idiosyncratic_pct = idiosyncratic_pct.clip(0, 100)
+
+
         var_decomp = pd.DataFrame({
-            "Systematic": systematic_var / total_var,
-            "Idiosyncratic": idiosyncratic_var / total_var
+            "Systematic": systematic_pct,
+            "Idiosyncratic": idiosyncratic_pct
         }, index=tickers)
-    else:
-        var_decomp = None
     
     return {
         'components': components,
@@ -1350,7 +1370,6 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
         st.pyplot(fig)
         
         # Display PC interpretations
-        st.subheader("Principal Component Interpretation")
         interp = pca_results['interpretations']
         
         for pc, data in interp.items():
@@ -1464,7 +1483,6 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                     }).background_gradient(cmap='RdYlGn', subset=['Correlation']))
                     
                     st.write("""
-                    **Interpretation:**
                     - Positive correlation suggests good factor timing ability
                     - Negative correlation suggests poor factor timing or contrarian exposure
                     - Values near zero suggest no consistent timing pattern
