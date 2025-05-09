@@ -1506,28 +1506,32 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 EXCLUDE_FROM_COMPOUNDING_SUFFIXES = ['_Diff']
                 EXCLUDE_FROM_COMPOUNDING_EXACT = ['CPI', 'USD_Index', 'Unemployment', 'VIX'] # VIX level, not typically compounded
 
-                # Filter the significant_factors_to_plot to get only those suitable for compounding
+                # Ensure 'UMD' is considered for this plot if available in factors
+                candidate_factors_for_compounding = list(set(significant_factors_to_plot)) # Make a unique list
+                if 'UMD' in factors.columns and 'UMD' not in candidate_factors_for_compounding:
+                    candidate_factors_for_compounding.append('UMD')
+
+                # Filter the candidate_factors_for_compounding to get only those suitable for compounding
                 factors_suitable_for_compounding = []
-                for factor_name in significant_factors_to_plot:
+                for factor_name in candidate_factors_for_compounding: # Use the augmented list
                     if factor_name in factors.columns: # Ensure factor exists
                         is_excluded = False
                         if any(factor_name.endswith(suffix) for suffix in EXCLUDE_FROM_COMPOUNDING_SUFFIXES):
                             is_excluded = True
                         if factor_name in EXCLUDE_FROM_COMPOUNDING_EXACT:
                             is_excluded = True
-                        
+
                         if not is_excluded:
                             factors_suitable_for_compounding.append(factor_name)
                 
-                available_factors_for_plot = factors_suitable_for_compounding # Use the filtered list
+                available_factors_for_plot = factors_suitable_for_compounding
 
                 if available_factors_for_plot:
-                    # Align factors with portfolio returns index and select relevant factors
+
                     aligned_factors_for_plot = factors.loc[port_r.index.intersection(factors.index), available_factors_for_plot]
                     
                     if not aligned_factors_for_plot.empty:
-                        # MODIFIED CALCULATION: Calculate rolling compounded returns
-                        # Add 1 to returns to get growth factors
+
                         growth_factors = 1 + aligned_factors_for_plot
                         # Calculate rolling product of growth factors
                         rolling_compounded_growth = growth_factors.rolling(window=factor_rolling_return_window, min_periods=max(1, factor_rolling_return_window // 2)).apply(np.prod, raw=True)
