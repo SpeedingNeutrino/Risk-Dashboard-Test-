@@ -167,7 +167,7 @@ def calc_conditional_var(returns: pd.Series, factor_returns: pd.Series,
         # Calculate conditional VaR using regression residuals
         X = sm.add_constant(window_data['factor'])
         y = window_data['returns']
-        model = sm.OLS(y, X).fit()
+        model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags':5})
         residuals = model.resid
         
         # Calculate VaR of residuals
@@ -604,7 +604,7 @@ def generate_advanced_factors(prices: pd.DataFrame, start_date: str) -> pd.DataF
         for col in returns.columns:
             if len(returns[col].dropna()) > 20:
                 X = sm.add_constant(market.iloc[:60])
-                model = sm.OLS(returns[col].iloc[:60], X).fit()
+                model = sm.OLS(returns[col].iloc[:60], X).fit(cov_type='HAC', cov_kwds={'maxlags':5})
                 betas[col] = model.params.iloc[1]   # Market beta
         
         beta_series = pd.Series(betas)
@@ -680,7 +680,7 @@ def regress_with_diagnostics(port_r: pd.Series, factors: pd.DataFrame) -> dict:
         return None
     
     X = sm.add_constant(factors.loc[common])
-    model = sm.OLS(port_r.loc[common], X).fit()
+    model = sm.OLS(port_r.loc[common], X).fit(cov_type='HAC', cov_kwds={'maxlags':5})
     
     # Calculate key statistics
     alpha_annualized = model.params['const'] * 252
