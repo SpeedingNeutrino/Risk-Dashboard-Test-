@@ -449,8 +449,9 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
             st.info("Attempting to fetch Momentum factor...")
             raw_data = pdr.DataReader("F-F_Momentum_Factor_daily", "famafrench", start=start)
             mom = raw_data[0] / 100
+            # mom.columns = mom.columns.str.strip()  
             mom.index = pd.to_datetime(mom.index).tz_localize(None)
-            mom.rename(columns={"Mom   ": "UMD"}, inplace=True)
+            mom.rename(columns={"Mom": "UMD"}, inplace=True)
             mom = mom.loc[mom.index >= pd.to_datetime(start)]
             st.success(f"Successfully fetched {len(mom)} rows of Momentum factor data")
             st.write(mom.tail())
