@@ -58,6 +58,7 @@ try:
     from sklearn.decomposition import PCA  # type: ignore
     from sklearn.cluster import KMeans  # type: ignore
     from sklearn.preprocessing import StandardScaler  # type: ignore
+    from sklearn.linear_model import ElasticNetCV  # type: ignore
 except ImportError:
     PCA = None  # type: ignore
     missing.append("scikit-learn")
@@ -91,7 +92,6 @@ MACRO_FRED = {
     "USD_Index": "DTWEXBGS",
     "WTI_Oil": "DCOILWTICO",
     "CPI": "CPIAUCSL",
-    "VIX": "VIXCLS",  # Will be converted to VIX_Diff
     "TED_Spread": "TEDRATE", # TED spread (3m Libor - 3m T-bill)
     "Credit_Spread": "BAA10Y", # Moody's BAA - 10Y Treasury
     "Unemployment": "UNRATE"
@@ -101,7 +101,15 @@ MACRO_FRED = {
 FACTOR_GROUPS = {
     "Traditional": ["Mkt-RF", "SMB", "HML", "UMD", "RMW", "CMA"], # Ensure RF is not here
     "Style": ["Value", "Size", "Momentum", "Quality", "Low_Vol", "Growth"], # Synthetic factors
-    "Macro": ["Yield_Curve_Diff", "USD_Index", "WTI_Oil", "VIX_Diff", "Credit_Spread_Diff", "TED_Spread_Diff", "CPI"], # Standardized names
+    "Macro": [
+        "Rate_Level_Diff",
+        "Yield_Curve_Diff",
+        "USD_Index",
+        "WTI_Oil",
+        "Credit_Spread_Diff",
+        "TED_Spread_Diff",
+        "CPI",
+    ],
     "Smart Beta": ["Min_Vol", "Max_Div", "Equal_Weight", "Quality_Tilt", "ESG_Tilt"] # Synthetic factors
 }
 
@@ -407,6 +415,7 @@ def read_factor_file(src, start: str):
 
 # ───── Online factor fetch (Enhanced) ─────
 
+@st.cache_data(show_spinner="Fetching factor data…")
 def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
     """Fetch expanded factor data from online sources with improved error handling"""
     
@@ -488,12 +497,23 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
                 
                 # Handle rate and spread columns: calculate _Diff
                 rate_cols_orig_names = [name for name in MACRO_FRED if 'Yield' in name or 'Spread' in name]
-                
+
                 for col_name in rate_cols_orig_names:
                     if col_name in macro.columns:
                         macro[f"{col_name}_Diff"] = macro[col_name].diff()
-                        cols_to_keep_final.append(f"{col_name}_Diff")
-                        processed_cols_for_debug.append(f"{col_name} (to {col_name}_Diff)")
+                        # Keep spread diffs, but for 10Y and 2Y yields we'll use a combined level diff
+                        if col_name not in ["10Y_Yield", "2Y_Yield"]:
+                            cols_to_keep_final.append(f"{col_name}_Diff")
+                            processed_cols_for_debug.append(f"{col_name} (to {col_name}_Diff)")
+
+                # Combine 10Y and 2Y yield moves into a single level factor
+                if "10Y_Yield_Diff" in macro.columns and "2Y_Yield_Diff" in macro.columns:
+                    macro["Rate_Level_Diff"] = (macro["10Y_Yield_Diff"] + macro["2Y_Yield_Diff"]) / 2
+                    cols_to_keep_final.append("Rate_Level_Diff")
+                    processed_cols_for_debug.append("Rate_Level_Diff (avg 10Y & 2Y)")
+
+                # Remove individual yield diffs to reduce collinearity
+                macro.drop(columns=[c for c in ["10Y_Yield_Diff", "2Y_Yield_Diff"] if c in macro.columns], inplace=True)
 
                 # Handle other columns (e.g., CPI, USD_Index, WTI_Oil): calculate pct_change()
                 other_cols_for_pct_change = [
@@ -545,6 +565,7 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
 
 # ───── Advanced Factor Generation ─────
 
+@st.cache_data(show_spinner="Generating synthetic factors…")
 def generate_advanced_factors(prices: pd.DataFrame, start_date: str) -> pd.DataFrame:
     """Generate an expanded set of factors from price data when external factors aren't available"""
     st.info("Using price-based synthetic factors")
@@ -764,6 +785,93 @@ def regress_with_diagnostics(port_r: pd.Series, factors: pd.DataFrame) -> dict:
         'model': model
     }
 
+def regress_with_elastic_net(port_r: pd.Series, factors: pd.DataFrame) -> Optional[dict]:
+    """Run ElasticNet regression with cross-validation to handle multicollinearity."""
+    if ElasticNetCV is None:
+        st.warning("scikit-learn is required for ElasticNet regression")
+        return None
+
+    common = port_r.index.intersection(factors.index)
+    if len(common) < 60:
+        st.warning(f"Not enough overlapping data points ({len(common)}) between portfolio and factors")
+        return None
+
+    y = port_r.loc[common]
+    X = factors.loc[common]
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    y_centered = y - y.mean()
+
+    enet = ElasticNetCV(l1_ratio=[0.1, 0.5, 0.9], alphas=np.logspace(-4, 0, 30), cv=5).fit(X_scaled, y_centered)
+
+    betas_scaled = enet.coef_
+    betas = pd.Series(betas_scaled / scaler.scale_, index=X.columns)
+    intercept = y.mean() - np.dot(scaler.mean_, betas_scaled / scaler.scale_)
+    pred = intercept + X.dot(betas)
+    residuals = y - pred
+
+    selected_cols = betas[betas.abs() > 1e-6].index
+    if len(selected_cols) > 0 and sm is not None:
+        X_sel = sm.add_constant(X[selected_cols])
+        ols_model = sm.OLS(y, X_sel).fit(cov_type='HAC', cov_kwds={'maxlags':5})
+        tvalues = ols_model.tvalues.drop('const')
+        pvalues = ols_model.pvalues.drop('const')
+        alpha_annualized = ols_model.params['const'] * 252
+        alpha_tstat = ols_model.tvalues['const']
+        r_squared = ols_model.rsquared
+        adj_r_squared = ols_model.rsquared_adj
+    else:
+        tvalues = pd.Series(index=X.columns, dtype=float)
+        pvalues = pd.Series(index=X.columns, dtype=float)
+        alpha_annualized = intercept * 252
+        alpha_tstat = np.nan
+        r_squared = 1 - residuals.var() / y.var()
+        adj_r_squared = np.nan
+
+    factor_cov = X.cov()
+    beta_vec = betas.values.reshape(-1, 1)
+    factor_contrib = pd.Series((beta_vec.T @ factor_cov.values @ beta_vec)[0][0], index=['Total Factor'])
+    contrib_detail = {}
+    for i, f1 in enumerate(betas.index):
+        contrib = 0.0
+        for j, f2 in enumerate(betas.index):
+            contrib += betas[f1] * betas[f2] * factor_cov.loc[f1, f2]
+        contrib_detail[f1] = contrib
+    factor_contrib_detail = pd.Series(contrib_detail)
+
+    specific_var = residuals.var()
+    total_var = y.var()
+    factor_pct = factor_contrib_detail / total_var
+    specific_pct = specific_var / total_var
+
+    tracking_error = residuals.std() * np.sqrt(252)
+    information_ratio = alpha_annualized / tracking_error if tracking_error > 0 else np.nan
+
+    het_pvalue = np.nan
+    if sm is not None and len(selected_cols) > 0:
+        bp_test = het_breuschpagan(residuals, sm.add_constant(X[selected_cols]))
+        het_pvalue = bp_test[1]
+
+    return {
+        'betas': betas,
+        'tvalues': tvalues,
+        'pvalues': pvalues,
+        'alpha': alpha_annualized,
+        'alpha_tstat': alpha_tstat,
+        'r_squared': r_squared,
+        'adj_r_squared': adj_r_squared,
+        'tracking_error': tracking_error,
+        'information_ratio': information_ratio,
+        'het_pvalue': het_pvalue,
+        'residuals': residuals,
+        'factor_contrib': factor_contrib_detail,
+        'factor_contrib_pct': factor_pct,
+        'specific_var': specific_var,
+        'specific_var_pct': specific_pct,
+        'model': enet
+    }
+
 def calc_rolling_betas(port_r: pd.Series, factors: pd.DataFrame, window: int = 126) -> pd.DataFrame:
     """Calculate rolling factor betas with robust outlier handling"""
     if RollingOLS is None:
@@ -900,9 +1008,9 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
             factor_quantiles[scenario_name] = 0.0
     
     custom_scenarios = {
-        "Market_Crash": {"Mkt-RF": -0.07, "VIX_Diff": 15},  # Mkt-RF shock, VIX_Diff shock (15 point VIX increase)
-        "Rate_Shock": {"10Y_Yield_Diff": 0.005, "2Y_Yield_Diff": 0.010}, # 0.5% and 1% increase in yield changes
-        "Inflation_Spike": {"CPI": 0.01, "10Y_Yield_Diff": 0.003}, # 1% CPI shock, 0.3% 10Y yield change shock
+        "Market_Crash": {"Mkt-RF": -0.07},  # 7% market drop
+        "Rate_Shock": {"Rate_Level_Diff": 0.0075, "Yield_Curve_Diff": 0.002},
+        "Inflation_Spike": {"CPI": 0.01, "Rate_Level_Diff": 0.004},
         "Value_Rotation": {"HML": 0.02, "UMD": -0.015}, # Value outperformance, momentum underperformance
         "Growth_Rally": {"HML": -0.02, "UMD": 0.02}, # Growth outperformance, momentum outperformance
         "Credit_Crisis": {"Credit_Spread_Diff": 0.004, "TED_Spread_Diff": 0.003} # 0.4% and 0.3% increase in spreads
@@ -912,13 +1020,12 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
         "Stagflation": {
             "Mkt-RF": -0.02, # 2% market drop
             "CPI": 0.008, # 0.8% CPI shock
-            "10Y_Yield_Diff": 0.003, # 0.3% yield shock
+            "Rate_Level_Diff": 0.003,
             "USD_Index": 0.01 # 1% USD Index shock
         },
         "Risk_Aversion": {
             "Mkt-RF": -0.03, # 3% market drop
             "SMB": -0.01, # 1% small cap underperformance
-            "VIX_Diff": 10, # 10 point VIX increase
             "Credit_Spread_Diff": 0.002 # 0.2% increase in credit spreads
         }
     }
@@ -1244,6 +1351,8 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
             "Ann. Return": port_r.mean() * 252,
             "Ann. Vol": port_r.std() * np.sqrt(252),
             "Sharpe Ratio": (port_r.mean() * 252) / (port_r.std() * np.sqrt(252)) if port_r.std() > 0 else np.nan,
+            "Sortino Ratio": (port_r.mean() * 252) / (port_r[port_r < 0].std() * np.sqrt(252)) if (port_r[port_r < 0].std() > 0) else np.nan,
+            "Calmar Ratio": (port_r.mean() * 252) / abs(_maxdd(port_r)) if _maxdd(port_r) != 0 else np.nan,
             "Max Drawdown": _maxdd(port_r),
             "Skewness": port_r.skew(),
             "Kurtosis": port_r.kurtosis()
@@ -1301,7 +1410,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
         st.subheader("Volatility Decomposition")
         
         # Run regression to get factor exposures and residuals
-        reg_results = regress_with_diagnostics(port_r, factors)
+        reg_results = regress_with_elastic_net(port_r, factors)
         
         if reg_results is not None:
             # Plot factor contribution to variance
@@ -1411,7 +1520,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
             return
     
     # Run regression analysis
-    reg_results = regress_with_diagnostics(port_r, factors)
+    reg_results = regress_with_elastic_net(port_r, factors)
     if reg_results is None or reg_results.get('betas') is None:
         st.error("Insufficient data for factor regression.")
         return
@@ -1420,13 +1529,14 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     st.subheader("Factor Exposures")
     
     # Create a more detailed table with statistical significance
-    factor_data = pd.DataFrame({
-        'Beta': reg_results['betas'],
-        't-value': reg_results['tvalues'],
-        'p-value': reg_results['pvalues'],
-        'Significance': ['***' if p < 0.01 else '**' if p < 0.05 else '*' if p < 0.1 else '' 
-                       for p in reg_results['pvalues']]
-    })
+    factor_data = pd.concat(
+        [reg_results['betas'], reg_results['tvalues'], reg_results['pvalues']],
+        axis=1
+    )
+    factor_data.columns = ['Beta', 't-value', 'p-value']
+    factor_data['Significance'] = factor_data['p-value'].apply(
+        lambda p: '***' if p < 0.01 else '**' if p < 0.05 else '*' if p < 0.1 else ''
+    )
     
     # Display in a tabular format
     st.dataframe(factor_data.style.format({
@@ -1508,7 +1618,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 
                 # Define factors to exclude from compounding calculation
                 EXCLUDE_FROM_COMPOUNDING_SUFFIXES = ['_Diff']
-                EXCLUDE_FROM_COMPOUNDING_EXACT = ['CPI', 'USD_Index', 'Unemployment', 'VIX'] # VIX level, not typically compounded
+                EXCLUDE_FROM_COMPOUNDING_EXACT = ['CPI', 'USD_Index', 'Unemployment']
 
                 # Ensure 'UMD' is considered for this plot if available in factors
                 candidate_factors_for_compounding = list(set(significant_factors_to_plot)) # Make a unique list
@@ -1787,6 +1897,8 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
             "Annualized Return": [port_r.mean() * 252, "{:.4%}"],
             "Annualized Volatility": [port_r.std() * np.sqrt(252), "{:.4%}"],
             "Sharpe Ratio": [(port_r.mean() * 252) / (port_r.std() * np.sqrt(252)) if port_r.std() > 0 else np.nan, "{:.4f}"],
+            "Sortino Ratio": [(port_r.mean() * 252) / (port_r[port_r < 0].std() * np.sqrt(252)) if (port_r[port_r < 0].std() > 0) else np.nan, "{:.4f}"],
+            "Calmar Ratio": [(port_r.mean() * 252) / abs(_maxdd(port_r)) if _maxdd(port_r) != 0 else np.nan, "{:.4f}"],
             "Max Drawdown": [_maxdd(port_r), "{:.4%}"],
             "Skewness": [port_r.skew(), "{:.4f}"],
             "Kurtosis": [port_r.kurtosis(), "{:.4f}"],
@@ -1954,11 +2066,16 @@ def main():
         help="Choose your factor data source"
        )
     
-    factors = None # Initialize factors
-    prices_df = pd.DataFrame() # Initialize prices DataFrame
+    factors = None  # Initialize factors
+    prices_df = pd.DataFrame()  # Initialize prices DataFrame
 
-    # Proceed only if weights are defined
-    if weights is not None and not weights.empty:
+    run_analysis = st.sidebar.button("Run Analysis")
+
+    if run_analysis and (weights is None or weights.empty):
+        st.error("Please provide valid portfolio holdings before running the analysis.")
+
+    # Proceed only if Run pressed and weights are defined
+    if run_analysis and weights is not None and not weights.empty:
         st.subheader("Current Portfolio")
         sorted_weights_display = weights.reindex(weights.abs().sort_values(ascending=False).index)
         weight_df_display = pd.DataFrame({
@@ -2029,8 +2146,11 @@ def main():
         else:
             st.info("Analysis could not proceed. Please check portfolio holdings and ensure price data can be loaded.")
 
-    else: # weights is None or empty initially
-        st.info("Please enter or upload valid portfolio holdings to begin analysis.")
+    else:
+        if not run_analysis:
+            st.info("Adjust parameters and press 'Run Analysis' to begin.")
+        else:
+            st.info("Please enter or upload valid portfolio holdings to begin analysis.")
 
 if __name__ == "__main__":
     main()
