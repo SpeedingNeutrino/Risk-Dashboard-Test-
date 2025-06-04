@@ -59,6 +59,7 @@ try:
     from sklearn.cluster import KMeans  # type: ignore
     from sklearn.preprocessing import StandardScaler  # type: ignore
     from sklearn.linear_model import ElasticNetCV  # type: ignore
+
 except ImportError:
     PCA = None  # type: ignore
     missing.append("scikit-learn")
@@ -430,6 +431,7 @@ def read_factor_file(src, start: str):
 
 @st.cache_data(show_spinner="Fetching factor data…")
 def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
+
     """Fetch expanded factor data from online sources with improved error handling"""
 
     if pdr is None:
@@ -505,6 +507,7 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
                 processed_cols_for_debug = []
 
                 # Handle rate and spread columns: calculate _Diff
+
                 rate_cols_orig_names = [name for name in MACRO_FRED if "Yield" in name or "Spread" in name]
 
                 for col_name in rate_cols_orig_names:
@@ -577,6 +580,7 @@ def fetch_online_factors(start: str) -> Optional[pd.DataFrame]:
 
 @st.cache_data(show_spinner="Generating synthetic factors…")
 def generate_advanced_factors(prices: pd.DataFrame, start_date: str) -> pd.DataFrame:
+
     """Generate an expanded set of factors from price data when external factors aren't available"""
     st.info("Using price-based synthetic factors")
 
@@ -706,6 +710,7 @@ def generate_advanced_factors(prices: pd.DataFrame, start_date: str) -> pd.DataF
 
 
 def regress_with_diagnostics(port_r: pd.Series, factors: pd.DataFrame) -> dict:
+
     """Run regression with comprehensive diagnostics"""
     if sm is None or factors is None:
         return None
@@ -779,6 +784,7 @@ def regress_with_diagnostics(port_r: pd.Series, factors: pd.DataFrame) -> dict:
     # Factor's proportion of total risk
     factor_pct = factor_contrib / total_var
     specific_pct = specific_var / total_var
+
 
     return {
         "betas": betas,
@@ -1033,12 +1039,14 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
             factor_quantiles[scenario_name] = 0.0
 
     custom_scenarios = {
+
         "Market_Crash": {"Mkt-RF": -0.07},  # 7% market drop
         "Rate_Shock": {"Rate_Level_Diff": 0.0075, "Yield_Curve_Diff": 0.002},
         "Inflation_Spike": {"CPI": 0.01, "Rate_Level_Diff": 0.004},
         "Value_Rotation": {"HML": 0.02, "UMD": -0.015},  # Value outperformance, momentum underperformance
         "Growth_Rally": {"HML": -0.02, "UMD": 0.02},  # Growth outperformance, momentum outperformance
         "Credit_Crisis": {"Credit_Spread_Diff": 0.004, "TED_Spread_Diff": 0.003},  # 0.4% and 0.3% increase in spreads
+
     }
 
     combined_scenarios = {
@@ -1047,6 +1055,7 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
             "CPI": 0.008,  # 0.8% CPI shock
             "Rate_Level_Diff": 0.003,
             "USD_Index": 0.01,  # 1% USD Index shock
+
         },
         "Risk_Aversion": {
             "Mkt-RF": -0.03,  # 3% market drop
@@ -1393,6 +1402,7 @@ def dashboard(
     # risk summary
     col1, col2 = st.columns(2)
     with col1:
+
         summ1 = {
             "Ann. Return": port_r.mean() * 252,
             "Ann. Vol": port_r.std() * np.sqrt(252),
@@ -1407,6 +1417,7 @@ def dashboard(
             "Skewness": port_r.skew(),
             "Kurtosis": port_r.kurtosis(),
         }
+
         st.dataframe(pd.DataFrame(summ1, index=["Value"]).T.style.format("{:.4f}"))
 
     with col2:
@@ -1459,7 +1470,9 @@ def dashboard(
         st.subheader("Volatility Decomposition")
 
         # Run regression to get factor exposures and residuals
+
         reg_results = regress_with_elastic_net(port_r, factors)
+
 
         if reg_results is not None:
             # Plot factor contribution to variance
@@ -1577,8 +1590,10 @@ def dashboard(
             return
 
     # Run regression analysis
+
     reg_results = regress_with_elastic_net(port_r, factors)
     if reg_results is None or reg_results.get("betas") is None:
+
         st.error("Insufficient data for factor regression.")
         return
 
@@ -1990,6 +2005,7 @@ def dashboard(
     # Add report download option
     if st.button("Generate Report Summary (CSV)"):
         # Create a summary DataFrame
+
         summary_data = {
             "Portfolio Info": ["", ""],
             "# of Holdings": [len(weights), ""],
@@ -2013,6 +2029,7 @@ def dashboard(
             ],
             "Calmar Ratio": [(port_r.mean() * 252) / abs(_maxdd(port_r)) if _maxdd(port_r) != 0 else np.nan, "{:.4f}"],
             "Max Drawdown": [_maxdd(port_r), "{:.4%}"],
+
             "Skewness": [port_r.skew(), "{:.4f}"],
             "Kurtosis": [port_r.kurtosis(), "{:.4f}"],
             "95% VaR (1-day)": [_var(port_r, 0.05), "{:.4%}"],
@@ -2187,6 +2204,7 @@ def main():
     factor_source = st.sidebar.radio(
         "Factor Data Source",
         ["Online (Ken French + FRED)", "Upload Factor CSV", "Generate Synthetic Factors (Not Implemented)"],
+
         help="Choose your factor data source",
     )
 
@@ -2200,6 +2218,7 @@ def main():
 
     # Proceed only if Run pressed and weights are defined
     if run_analysis and weights is not None and not weights.empty:
+
         st.subheader("Current Portfolio")
         sorted_weights_display = weights.reindex(weights.abs().sort_values(ascending=False).index)
         weight_df_display = pd.DataFrame({"Weight": sorted_weights_display, "Weight (%)": sorted_weights_display * 100})
