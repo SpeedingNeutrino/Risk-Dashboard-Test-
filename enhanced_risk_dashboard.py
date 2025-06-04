@@ -92,7 +92,6 @@ MACRO_FRED = {
     "USD_Index": "DTWEXBGS",
     "WTI_Oil": "DCOILWTICO",
     "CPI": "CPIAUCSL",
-    "VIX": "VIXCLS",  # Will be converted to VIX_Diff
     "TED_Spread": "TEDRATE", # TED spread (3m Libor - 3m T-bill)
     "Credit_Spread": "BAA10Y", # Moody's BAA - 10Y Treasury
     "Unemployment": "UNRATE"
@@ -107,7 +106,6 @@ FACTOR_GROUPS = {
         "Yield_Curve_Diff",
         "USD_Index",
         "WTI_Oil",
-        "VIX_Diff",
         "Credit_Spread_Diff",
         "TED_Spread_Diff",
         "CPI",
@@ -1010,7 +1008,7 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
             factor_quantiles[scenario_name] = 0.0
     
     custom_scenarios = {
-        "Market_Crash": {"Mkt-RF": -0.07, "VIX_Diff": 15},  # Mkt-RF shock, VIX_Diff shock (15 point VIX increase)
+        "Market_Crash": {"Mkt-RF": -0.07},  # 7% market drop
         "Rate_Shock": {"Rate_Level_Diff": 0.0075, "Yield_Curve_Diff": 0.002},
         "Inflation_Spike": {"CPI": 0.01, "Rate_Level_Diff": 0.004},
         "Value_Rotation": {"HML": 0.02, "UMD": -0.015}, # Value outperformance, momentum underperformance
@@ -1028,7 +1026,6 @@ def run_stress_tests(betas: pd.Series, factors: pd.DataFrame) -> pd.DataFrame:
         "Risk_Aversion": {
             "Mkt-RF": -0.03, # 3% market drop
             "SMB": -0.01, # 1% small cap underperformance
-            "VIX_Diff": 10, # 10 point VIX increase
             "Credit_Spread_Diff": 0.002 # 0.2% increase in credit spreads
         }
     }
@@ -1532,13 +1529,14 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
     st.subheader("Factor Exposures")
     
     # Create a more detailed table with statistical significance
-    factor_data = pd.DataFrame({
-        'Beta': reg_results['betas'],
-        't-value': reg_results['tvalues'],
-        'p-value': reg_results['pvalues'],
-        'Significance': ['***' if p < 0.01 else '**' if p < 0.05 else '*' if p < 0.1 else '' 
-                       for p in reg_results['pvalues']]
-    })
+    factor_data = pd.concat(
+        [reg_results['betas'], reg_results['tvalues'], reg_results['pvalues']],
+        axis=1
+    )
+    factor_data.columns = ['Beta', 't-value', 'p-value']
+    factor_data['Significance'] = factor_data['p-value'].apply(
+        lambda p: '***' if p < 0.01 else '**' if p < 0.05 else '*' if p < 0.1 else ''
+    )
     
     # Display in a tabular format
     st.dataframe(factor_data.style.format({
@@ -1620,7 +1618,7 @@ def dashboard(weights: pd.Series, prices: pd.DataFrame, start: str, factors: Opt
                 
                 # Define factors to exclude from compounding calculation
                 EXCLUDE_FROM_COMPOUNDING_SUFFIXES = ['_Diff']
-                EXCLUDE_FROM_COMPOUNDING_EXACT = ['CPI', 'USD_Index', 'Unemployment', 'VIX'] # VIX level, not typically compounded
+                EXCLUDE_FROM_COMPOUNDING_EXACT = ['CPI', 'USD_Index', 'Unemployment']
 
                 # Ensure 'UMD' is considered for this plot if available in factors
                 candidate_factors_for_compounding = list(set(significant_factors_to_plot)) # Make a unique list
