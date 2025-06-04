@@ -768,28 +768,31 @@ def calc_rolling_betas(port_r: pd.Series, factors: pd.DataFrame, window: int = 1
     """Calculate rolling factor betas with robust outlier handling"""
     if RollingOLS is None:
         return None
-    
+
     common = port_r.index.intersection(factors.index)
     if len(common) < window + 30:
         st.warning(f"Not enough data for rolling analysis (need {window + 30} points, have {len(common)})")
         return None
-    
+
     Y = port_r.loc[common]
     X = factors.loc[common]
-    
-    # Initialize DataFrame for rolling betas
-    rolling_betas = pd.DataFrame(index=common, columns=X.columns)
+
+    # Drop rows with any NaNs to avoid RollingOLS errors
+    aligned = pd.concat([Y, X], axis=1).dropna()
+    Y = aligned.iloc[:, 0]
+    X = aligned.iloc[:, 1:]
+
+    # Initialize DataFrame for rolling betas with cleaned index
+    rolling_betas = pd.DataFrame(index=aligned.index, columns=X.columns)
     
     try:
         # Calculate rolling betas with proper error handling
-        with np.errstate(invalid='ignore', divide='ignore'):  # Suppress numpy warnings
+        with np.errstate(invalid='ignore', divide='ignore'):
             roll_model = RollingOLS(Y, sm.add_constant(X), window=window)
             roll_res = roll_model.fit()
-            
-            # Extract parameters (skip the constant)
-            for i, col in enumerate(X.columns):
-                # Access the parameters for each variable correctly
-                rolling_betas[col] = roll_res.params.iloc[:, i+1]  # Use iloc instead of direct indexing
+
+            params = roll_res.params.drop(columns="const")
+            rolling_betas.loc[params.index, params.columns] = params
         
         # Comprehensive cleaning of extreme outliers and invalid values
         for col in rolling_betas.columns:
